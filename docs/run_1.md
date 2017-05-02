@@ -1,7 +1,6 @@
 # Results for pix2pix and first CycleGAN
 
-|name|input|output pix2pix|output CycleGAN|output CycleGAN|target|
-|    |     |(u-net)       |(u-net        )|(faststyle-net)|      |
+|name|input| pix2pix| CycleGAN (u-net)| CycleGAN (faststyle-net)|target|
 |---|---|---|---|---|---|
 |1|![](run_1_images/1-inputs.png)|![](run_1_images/1-outputs-pix2pix.png)|![](run_1_images/1-outputs-CycleGAN.png)| ![](run_1_images/1-outputs-CycleGAN-faststyle.png) |![](run_1_images/1-targets.png)|
 
