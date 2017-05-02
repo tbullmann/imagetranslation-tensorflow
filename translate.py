@@ -13,9 +13,12 @@ import collections
 import math
 import time
 
+# from faststyle_net3 import create_faststyle_net
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir", help="path to folder containing images")
 parser.add_argument("--model", required=True, choices=["pix2pix", "CycleGAN"])
+parser.add_argument("--generator", default="unet", choices=["unet", "faststyle"])
 parser.add_argument("--mode", required=True, choices=["train", "test", "export"])
 parser.add_argument("--output_dir", required=True, help="where to put output files")
 parser.add_argument("--seed", type=int)
@@ -91,13 +94,14 @@ def augment(image, brightness):
     return rgb
 
 
-def conv(batch_input, out_channels, stride):
+def conv(batch_input, out_channels, size=4, stride=2):
     with tf.variable_scope("conv"):
         in_channels = batch_input.get_shape()[3]
-        filter = tf.get_variable("filter", [4, 4, in_channels, out_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02))
+        filter = tf.get_variable("filter", [size, size, in_channels, out_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02))
         # [batch, in_height, in_width, in_channels], [filter_width, filter_height, in_channels, out_channels]
         #     => [batch, out_height, out_width, out_channels]
-        padded_input = tf.pad(batch_input, [[0, 0], [1, 1], [1, 1], [0, 0]], mode="CONSTANT")
+        p = int((size - 1) / 2)
+        padded_input = tf.pad(batch_input, [[0, 0], [p, p], [p, p], [0, 0]], mode="CONSTANT")
         conv = tf.nn.conv2d(padded_input, filter, [1, stride, stride, 1], padding="VALID")
         return conv
 
@@ -338,7 +342,7 @@ def load_examples():
     )
 
 
-def create_generator(generator_inputs, generator_outputs_channels):
+def create_u_net(generator_inputs, generator_outputs_channels):
     layers = []
 
     # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
@@ -404,6 +408,69 @@ def create_generator(generator_inputs, generator_outputs_channels):
         layers.append(output)
 
     return layers[-1]
+
+
+def create_faststyle_net(generator_inputs, generator_outputs_channels, n_res_blocks=9):
+    layers = []
+    ngf = 32
+
+    # encoder_1 = c7s1 - 32: [batch, 256, 256, in_channels] => [batch, 256, 256, ngf]
+    with tf.variable_scope("encoder_1"):
+        output = conv(generator_inputs, ngf, size=7, stride=1)
+        layers.append(output)
+
+    # encoder_2 = d64: [batch, 256, 256, ngf] => [batch, 128, 128, ngf*2]
+    with tf.variable_scope("encoder_2"):
+        output = conv(layers[-1], ngf*2, size=3, stride=2)
+        layers.append(output)
+
+    # encoder_3 = d128: [batch, 128, 128, ngf*2] => [batch, 64, 64, ngf*4]
+    with tf.variable_scope("encoder_3"):
+        output = conv(layers[-1], ngf*4, size=3, stride=2)
+        layers.append(output)
+
+    # 9 residual blocks = r128: [batch, 64, 64, ngf*4] => [batch, 64, 64, ngf*4]
+    for block in range(n_res_blocks):
+        with tf.variable_scope("residual_%d" % (block + 1)):
+            input = layers[-1]
+            output = input
+            for layer in range(2):
+                with tf.variable_scope("layer_%d" % (layer + 1)):
+                    output = conv(output, ngf * 4, size=3, stride=1)
+                    output = batchnorm(output)
+                    output = tf.nn.relu(output)
+            layers.append(input+output)
+
+    # decoder_3 = u64: [batch, 64, 64, ngf*4] => [batch, 128, 128, ngf*2]
+    with tf.variable_scope("decoder_3"):
+        input = layers[-1]
+        output = deconv(input, ngf*2)
+        output = batchnorm(output)
+        rectified = tf.nn.relu(output)
+        layers.append(rectified)
+
+    # decoder_2 = u32: [batch, 128, 128, ngf*2] => [batch, 256, 256, ngf]
+    with tf.variable_scope("decoder_2"):
+        input = layers[-1]
+        output = deconv(input, ngf)
+        output = batchnorm(output)
+        rectified = tf.nn.relu(output)
+        layers.append(rectified)
+
+    # decoder_1 = c7s1-3: [batch, 256, 256, ngf] => [batch, 256, 256, generator_output_channels]
+    with tf.variable_scope("decoder_1"):
+        input = layers[-1]
+        output = conv(input, generator_outputs_channels, size=7, stride=1)
+        output = tf.tanh(output)
+        layers.append(output)
+
+    return layers[-1]
+
+
+if a.generator == 'unet':
+    create_generator = create_u_net
+elif a.generator == 'faststyle':
+    create_generator = create_faststyle_net
 
 
 def create_discriminator(input):

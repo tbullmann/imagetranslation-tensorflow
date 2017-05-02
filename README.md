@@ -1,6 +1,6 @@
 # Image translation by CycleGAN and pix2pix in Tensorflow
 
-This is my ongoing tensorflow implementation for unpaired image-to-image translation. It extends [this](https://github.com/affinelayer/pix2pix-tensorflow) Tensorflow implementation of the paired image-to-image translation. 
+This is my ongoing tensorflow implementation for unpaired image-to-image translation ([Zhu et al., 2017](https://arxiv.org/pdf/1703.10593.pdf)). 
 
 Image-to-image translation learns a mapping from input images to output images, like these examples from the original papers. 
 
@@ -11,26 +11,6 @@ Image-to-image translation learns a mapping from input images to output images, 
 
 <img src="https://phillipi.github.io/pix2pix/images/teaser_v3.png" width="900px"/>
 
-## Citation
-
-If you use this code for your research, please cite the papers this code is based on:
-
-```tex
-@article{pix2pix2016,
-  title={Image-to-Image Translation with Conditional Adversarial Networks},
-  author={Isola, Phillip and Zhu, Jun-Yan and Zhou, Tinghui and Efros, Alexei A},
-  journal={arxiv},
-  year={2016}
-}
-
-@article{CycleGAN2017,
-  title={Unpaired Image-to-Image Translation using Cycle-Consistent Adversarial Networkss},
-  author={Zhu, Jun-Yan and Park, Taesung and Isola, Phillip and Efros, Alexei A},
-  journal={arXiv preprint arXiv:1703.10593},
-  year={2017}
-}
-```
-
 ## Prerequisites
 - Linux or OSX.
 - Python 2 or Python 3.
@@ -39,7 +19,7 @@ If you use this code for your research, please cite the papers this code is base
 ## Requirements
 Tensorflow 1.0
 
-## Prefered
+## Preferred
 - Anaconda Python distribution
 - PyCharm
 
@@ -82,7 +62,8 @@ python translate.py \
 ```
 The test run will output an HTML file at `temp/facades_test/index.html` that shows input/output/target image sets.
 
-For training of the CycleGAN use ```--model CycleGAN``` instead of ```--model pix2pix```.
+For training of the CycleGAN use ```--model CycleGAN``` instead of ```--model pix2pix```. 
+Both models use u-net as generator by default but can use faststyle-net when specified by ```--generator faststyle```.
 
 You can look at the loss and computation graph for [pix2pix](docs/run_1_images/Graph_Pix2Pix.png) and [CycleGAN](docs/run_1_images/Graph_CycleGAN.png) using tensorboard:
 
@@ -94,27 +75,67 @@ If you wish to write in-progress pictures as the network is training, use ```--d
 
 ## TODO
 
-### Finish CycleGAN implementation according to match publication
-- refactor summary to work for both Pix2Pix and CycleGAN
-- replace the negative log likelihood objective by a least square loss
-- generator using the network from [fast-neural-style project](https://github.com/darkstar112358/fast-neural-style)
-- instance normalization layer from [fast-neural-style project](https://github.com/darkstar112358/fast-neural-style)
+### Finish CycleGAN implementation according to match publication Hu et al., 2017
+- replace the negative log likelihood objective by a least square loss 
+- add block size to parser for faststyle-net architecture
+- add instance normalization ([Ulyanov D et al., 2016](https://arxiv.org/abs/1607.08022))
 - update discriminators using a history of generated images by adding image buffer that stores the 50 previous image
 - flexible learning rate for the Adams solver
-- "unpair" images for testing CycleGAN
-
-### Later
-- add import of images from different subdirectories, and of image stacks from multi-tiff and hdf5
-- test different number of channels, e.g. grayscale or 5 channels
-- translate images with arbitrary size (height, width)
-- add more export options
-- refactor models, modules into separate files
-- add reflection and other padding layers
+- unpair images for testing CycleGAN
 - add one-direction test mode for CycleGAN
 - add identity loss
-- add more preprocessing options
+- add flexibility to padding layers, e.g. reflection as well
+- resize-convolution on top of deconvolution for better upsampling ([Odena et al., 2016](http://distill.pub/2016/deconv-checkerboard/))
+
+### Merge paired and unpaired translastion
+- refactor summary to work for both Pix2Pix and CycleGAN
+- Pix2Pix2 
+- add dropout layers to faststyle net
+
+### Import and export
+- add import of images from different subdirectories, and of image stacks from multi-tiff and hdf5
+- images with arbitrary height width and color channels (input/target)
+- add more preprocessing options for augmentation
+- move lab_colorization(split input image into brightness and color)
+
+### Testing
 - fully test CPU mode and multi-GPU mode
 - add different generators 
 
 ## Done
-- Testing CycleGAN with unet generator and log loss and compare with pix2pix [OK](docs/run_1.md) 
+- test CycleGAN with u-net generator and log loss and compare with pix2pix: [OK](docs/run_1.md) 
+- test CycleGAN with faststyle-net generator and log loss: [OK](docs/run_1.md) 
+
+## Acknowledgement
+
+This repository is based on [this](https://github.com/affinelayer/pix2pix-tensorflow) Tensorflow implementation of the paired image-to-image translation ([Isola et al., 2016](https://arxiv.org/pdf/1611.07004v1.pdf)) 
+
+## Citation
+
+If you use this code for your research, please cite the papers this code is based on:
+
+```tex
+@article{pix2pix2016,
+  title={Image-to-Image Translation with Conditional Adversarial Networks},
+  author={Isola, Phillip and Zhu, Jun-Yan and Zhou, Tinghui and Efros, Alexei A},
+  journal={arxiv},
+  year={2016}
+}
+
+@article{CycleGAN2017,
+  title={Unpaired Image-to-Image Translation using Cycle-Consistent Adversarial Networkss},
+  author={Zhu, Jun-Yan and Park, Taesung and Isola, Phillip and Efros, Alexei A},
+  journal={arXiv preprint arXiv:1703.10593},
+  year={2017}
+}
+
+@inproceedings{johnson2016perceptual,
+  title={Perceptual losses for real-time style transfer and super-resolution},
+  author={Johnson, Justin and Alahi, Alexandre and Fei-Fei, Li},
+  booktitle={European Conference on Computer Vision},
+  pages={694--711},
+  year={2016},
+  organization={Springer}
+}
+
+```

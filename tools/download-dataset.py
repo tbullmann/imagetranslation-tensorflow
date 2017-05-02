@@ -12,6 +12,11 @@ import tempfile
 import shutil
 
 dataset = sys.argv[1]
+try:
+    path = sys.argv[2]
+except IndexError:
+    path ='.'
+
 url = "https://people.eecs.berkeley.edu/~tinghuiz/projects/pix2pix/datasets/%s.tar.gz" % dataset
 with tempfile.TemporaryFile() as tmp:
     print("downloading", url)
@@ -19,6 +24,6 @@ with tempfile.TemporaryFile() as tmp:
     print("extracting")
     tmp.seek(0)
     tar = tarfile.open(fileobj=tmp)
-    tar.extractall()
+    tar.extractall(path=path)
     tar.close()
     print("done")
