@@ -19,10 +19,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir", help="path to folder containing images")
 parser.add_argument("--model", required=True, choices=["pix2pix", "CycleGAN"])
 parser.add_argument("--generator", default="unet", choices=["unet", "faststyle"])
+parser.add_argument("--res_blocks", default="9", help="number of residual blocks in faststyle net")
 parser.add_argument("--mode", required=True, choices=["train", "test", "export"])
 parser.add_argument("--output_dir", required=True, help="where to put output files")
 parser.add_argument("--seed", type=int)
 parser.add_argument("--checkpoint", default=None, help="directory with checkpoint to resume training from or use for testing")
+parser.add_argument("--loss", default="log", choices=["log", "square"])
 
 parser.add_argument("--max_steps", type=int, help="number of training steps (0 to disable)")
 parser.add_argument("--max_epochs", type=int, help="number of training epochs")
@@ -504,8 +506,40 @@ def create_discriminator(input):
     return layers[-1]
 
 
-def create_pix2pix_model(inputs, targets):
-    with tf.variable_scope("generator") as scope:
+def log_loss(real, fake, paired=True):
+    # minimizing -tf.log(x) will try to get x to 1
+    # predict_real => 1
+    # predict_fake => 0
+    if paired:
+        with tf.name_scope('log_loss_paired_images'):
+            result = tf.reduce_mean(-(tf.log(real + EPS) + tf.log(1 - fake + EPS)))
+    else:
+        with tf.name_scope('log_loss_unpaired_images'):
+            result = tf.reduce_mean(-tf.log(real + EPS)) + tf.reduce_mean(-tf.log(1 - fake + EPS))
+    return result
+
+
+def square_loss(real, fake, paired=True):
+    # minimizing tf.square(1 - x) will try to get x to 1
+    # predict_real => 1
+    # predict_fake => 0
+    if paired:
+        with tf.name_scope('square_loss_paired_images'):
+            result = tf.reduce_mean(tf.square(real - 1)) + tf.reduce_mean(tf.square(fake))
+    else:
+        with tf.name_scope('square_loss_unpaired_images'):
+            result = tf.reduce_mean(tf.square(real - 1) + tf.square(fake))
+    return result
+
+
+if a.loss == "log":
+    loss = log_loss
+elif a.loss == "square":
+    los = square_loss
+
+
+def create_pix2pix_model(inputs, targets, generator_name="generator", discriminator_name="discriminator"):
+    with tf.variable_scope(generator_name) as scope:
         out_channels = int(targets.get_shape()[-1])
         outputs = create_generator(inputs, out_channels)
 
@@ -516,38 +550,34 @@ def create_pix2pix_model(inputs, targets):
         input = tf.concat([discrim_inputs, discrim_targets], axis=3)
         return create_discriminator(input)
 
-    with tf.name_scope("real_discriminator"):
-        with tf.variable_scope("discriminator"):
+    with tf.name_scope(discriminator_name):
+        with tf.variable_scope(discriminator_name):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
             predict_real = create_discriminator_for_image_pairs(inputs, targets)
 
-    with tf.name_scope("fake_discriminator"):
-        with tf.variable_scope("discriminator", reuse=True):
+    with tf.name_scope(discriminator_name+"_on_fake"):
+        with tf.variable_scope(discriminator_name, reuse=True):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
             predict_fake = create_discriminator_for_image_pairs(inputs, outputs)
 
-    with tf.name_scope("discriminator_loss"):
-        # minimizing -tf.log will try to get inputs to 1
-        # predict_real => 1
-        # predict_fake => 0
-        discrim_loss = tf.reduce_mean(-(tf.log(predict_real + EPS) + tf.log(1 - predict_fake + EPS)))
+    with tf.name_scope(discriminator_name+"_loss"):
+        discrim_loss = loss(predict_real, predict_fake)
 
-    with tf.name_scope("generator_loss"):
-        # predict_fake => 1
-        # abs(targets - outputs) => 0
-        gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
+    with tf.name_scope(generator_name+"_loss"):
+        # gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
+        gen_loss_GAN = -discrim_loss
         gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
         gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
 
-    with tf.name_scope("discriminator_train"):
-        discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith("discriminator")]
+    with tf.name_scope(discriminator_name+"_train"):
+        discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith(discriminator_name)]
         discrim_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
         discrim_grads_and_vars = discrim_optim.compute_gradients(discrim_loss, var_list=discrim_tvars)
         discrim_train = discrim_optim.apply_gradients(discrim_grads_and_vars)
 
-    with tf.name_scope("generator_train"):
+    with tf.name_scope(generator_name+"_train"):
         with tf.control_dependencies([discrim_train]):
-            gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator")]
+            gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith(generator_name)]
             gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
             gen_grads_and_vars = gen_optim.compute_gradients(gen_loss, var_list=gen_tvars)
             gen_train = gen_optim.apply_gradients(gen_grads_and_vars)
@@ -574,64 +604,54 @@ def create_pix2pix_model(inputs, targets):
 def create_CycleGAN_model(X, Y):
     # create two generators G and F, one for forward and one for backward translation, each having two copies,
     # one for real images and one for fake images which share the same underlying variables
-    with tf.name_scope("generator_G"):
-        with tf.variable_scope("generator_G") as scope:
+    with tf.name_scope("G"):
+        with tf.variable_scope("G") as scope:
             Y_channels = int(Y.get_shape()[-1])
             fake_Y = create_generator(X, Y_channels)
 
-    with tf.name_scope("generator_F"):
-        with tf.variable_scope("generator_F") as scope:
+    with tf.name_scope("F"):
+        with tf.variable_scope("F") as scope:
             X_channels = int(X.get_shape()[-1])
             fake_X = create_generator(Y, X_channels)
 
-    with tf.name_scope("generator_G_from_fake_X"):
-        with tf.variable_scope("generator_G", reuse=True) as scope:
+    with tf.name_scope("G_on_fake"):
+        with tf.variable_scope("G", reuse=True) as scope:
             Y_channels = int(Y.get_shape()[-1])
             fake_Y_from_fake_X = create_generator(fake_X, Y_channels)
 
-    with tf.name_scope("generator_F_from_fake_Y"):
-        with tf.variable_scope("generator_F", reuse=True) as scope:
+    with tf.name_scope("F_on_fake"):
+        with tf.variable_scope("F", reuse=True) as scope:
             X_channels = int(X.get_shape()[-1])
             fake_X_from_fake_Y = create_generator(fake_Y, X_channels)
 
     # create two discriminators D_X and D_Y, each having two copies,
     # one for real images and one for fake image which share the same underlying variables
-    with tf.name_scope("discriminator_X"):
-        with tf.variable_scope("discriminator_X"):
+    with tf.name_scope("D_X"):
+        with tf.variable_scope("D_X"):
             # [batch, height, width, channels] => [batch, 30, 30, 1]
             predict_real_X = create_discriminator(X)
 
-    with tf.name_scope("discriminator_X_fake"):
-        with tf.variable_scope("discriminator_X", reuse=True):
+    with tf.name_scope("D_X_one_fake"):
+        with tf.variable_scope("D_X", reuse=True):
             # [batch, height, width, channels] => [batch, 30, 30, 1]
             predict_fake_X = create_discriminator(fake_X)
 
-    with tf.name_scope("discriminator_Y"):
-        with tf.variable_scope("discriminator_Y"):
+    with tf.name_scope("D_Y"):
+        with tf.variable_scope("D_Y"):
             # [batch, height, width, channels] => [batch, 30, 30, 1]
             predict_real_Y = create_discriminator(Y)
 
-    with tf.name_scope("discriminator_Y_fake"):
-        with tf.variable_scope("discriminator_Y", reuse=True):
+    with tf.name_scope("D_Y_on_fake"):
+        with tf.variable_scope("D_Y", reuse=True):
             # [batch, height, width, channels] => [batch, 30, 30, 1]
             predict_fake_Y = create_discriminator(fake_Y)
 
     # define loss for D_X and D_Y
-    with tf.name_scope("discriminator_X_loss"):
-        # minimizing -tf.log will try to get inputs to 1
-        # predict_real => 1
-        # predict_fake => 0
-        discrim_X_loss = tf.reduce_mean(-(tf.log(predict_real_X + EPS) + tf.log(1 - predict_fake_X + EPS)))
-        # Square loss instead of log loss
-        # discrim_X_loss = tf.reduce_mean((tf.square(predict_real_X - 1) + tf.square(predict_fake_X)))
+    with tf.name_scope("D_X_loss"):
+        discrim_X_loss = loss(predict_real_X, predict_fake_X, paired=False)
 
-    with tf.name_scope("discriminator_Y_loss"):
-        # minimizing -tf.log will try to get inputs to 1
-        # predict_real => 1
-        # predict_fake => 0
-        discrim_Y_loss = tf.reduce_mean(-(tf.log(predict_real_Y + EPS) + tf.log(1 - predict_fake_Y + EPS)))
-        # Square loss instead of log loss
-        # discrim_Y_loss = tf.reduce_mean((tf.square(predict_real_Y - 1) + tf.square(predict_fake_Y)))
+    with tf.name_scope("D_Y_loss"):
+        discrim_Y_loss = loss(predict_real_Y, predict_fake_Y, paired=False)
 
     # define cycle_consistency loss, one for foward one for backward
     with tf.name_scope("cycle_consistency_loss"):
@@ -640,16 +660,18 @@ def create_CycleGAN_model(X, Y):
         cycle_consistency_loss_L1 = forward_loss_L1 + backward_loss_L1
 
     # define loss for G and F
-    with tf.name_scope("generator_G_loss"):
+    with tf.name_scope("G_loss"):
         # predict_fake => 1
         # abs() => 0
-        gen_G_loss_GAN = tf.reduce_mean(-tf.log(predict_fake_Y + EPS))
+        # gen_G_loss_GAN = tf.reduce_mean(-tf.log(predict_fake_Y + EPS))
+        gen_G_loss_GAN = -discrim_Y_loss
         gen_G_loss = gen_G_loss_GAN * a.gan_weight + cycle_consistency_loss_L1 * a.l1_weight
 
-    with tf.name_scope("generator_F_loss"):
+    with tf.name_scope("F_loss"):
         # predict_fake => 1
         # abs() => 0
-        gen_F_loss_GAN = tf.reduce_mean(-tf.log(predict_fake_X + EPS))
+        # gen_F_loss_GAN = tf.reduce_mean(-tf.log(predict_fake_X + EPS))
+        gen_F_loss_GAN = -discrim_X_loss
         gen_F_loss = gen_G_loss_GAN * a.gan_weight + cycle_consistency_loss_L1 * a.l1_weight
 
     # train discriminators
@@ -660,11 +682,11 @@ def create_CycleGAN_model(X, Y):
         discrim_train = discrim_optim.apply_gradients(discrim_grads_and_vars)
         return discrim_grads_and_vars, discrim_train
 
-    with tf.name_scope("discriminator_Y_train"):
-        discrim_Y_grads_and_vars, discrim_Y_train = train_discriminator("discriminator_Y", discrim_Y_loss)
+    with tf.name_scope("D_Y_train"):
+        discrim_Y_grads_and_vars, discrim_Y_train = train_discriminator("D_Y", discrim_Y_loss)
 
-    with tf.name_scope("discriminator_X_train"):
-        discrim_X_grads_and_vars, discrim_X_train = train_discriminator("discriminator_X", discrim_X_loss)
+    with tf.name_scope("D_X_train"):
+        discrim_X_grads_and_vars, discrim_X_train = train_discriminator("D_X", discrim_X_loss)
 
     # train generators
     def train_generator(prefix, gen_loss):
@@ -674,13 +696,13 @@ def create_CycleGAN_model(X, Y):
         gen_train = gen_optim.apply_gradients(gen_grads_and_vars)
         return gen_grads_and_vars, gen_train
 
-    with tf.name_scope("generator_G_train"):
+    with tf.name_scope("G_train"):
         with tf.control_dependencies([discrim_Y_train]):
-            gen_G_grads_and_vars, gen_G_train = train_generator("generator_G", gen_G_loss)
+            gen_G_grads_and_vars, gen_G_train = train_generator("G", gen_G_loss)
 
-    with tf.name_scope("generator_F_train"):
+    with tf.name_scope("F_train"):
         with tf.control_dependencies([discrim_X_train]):
-            gen_F_grads_and_vars, gen_F_train = train_generator("generator_F", gen_F_loss)
+            gen_F_grads_and_vars, gen_F_train = train_generator("F", gen_F_loss)
 
     # other variables
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
@@ -725,6 +747,7 @@ def create_CycleGAN_model(X, Y):
         outputs=fake_Y,
         train=tf.group(update_losses, incr_global_step, gen_G_train),
     )
+
 
 def save_images(fetches, step=None):
     image_dir = os.path.join(a.output_dir, "images")
@@ -869,9 +892,9 @@ def main():
     print("examples count = %d" % examples.count)
 
     # inputs and targets are [batch_size, height, width, channels]
-    if a.model=='pix2pix':
+    if a.model == 'pix2pix':
         model = create_pix2pix_model(examples.inputs, examples.targets)
-    elif a.model=='CycleGAN':
+    elif a.model == 'CycleGAN':
         model = create_CycleGAN_model(examples.inputs, examples.targets)
 
     # undo colorization splitting on images that we use for display/output
