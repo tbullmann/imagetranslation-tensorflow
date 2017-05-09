@@ -118,6 +118,7 @@ Minor issues
 - test CycleGAN with u-net generator and log loss and compare with pix2pix: [OK](docs/run_1.md) 
 - test CycleGAN with faststyle-net generator and log loss: [OK](docs/run_1.md) 
 - proper loss function for generator (maximising discriminator loss) and optional square loss
+- test Pix2Pix2 model, transfer checkpoint to CycleGAN: [OK](docs/run_2.md) 
 
 ## Acknowledgement
 
