@@ -13,11 +13,13 @@ import collections
 import math
 import time
 
-# from faststyle_net3 import create_faststyle_net
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir", help="path to folder containing images")
-parser.add_argument("--model", required=True, choices=["pix2pix", "CycleGAN"])
+parser.add_argument("--input_dir_B", help="path to folder containing images")
+parser.add_argument("--image_height", help="image height")
+parser.add_argument("--image_width", help="image width")
+parser.add_argument("--model", required=True, choices=["pix2pix", "pix2pix2", "CycleGAN"])
 parser.add_argument("--generator", default="unet", choices=["unet", "faststyle"])
 parser.add_argument("--res_blocks", default="9", help="number of residual blocks in faststyle net")
 parser.add_argument("--mode", required=True, choices=["train", "test", "export"])
@@ -36,8 +38,6 @@ parser.add_argument("--trace_freq", type=int, default=0, help="trace execution e
 parser.add_argument("--display_freq", type=int, default=0, help="write current training images every display_freq steps")
 parser.add_argument("--save_freq", type=int, default=5000, help="save model every save_freq steps, 0 to disable")
 
-parser.add_argument("--aspect_ratio", type=float, default=1.0, help="aspect ratio of output images (width/height)")
-parser.add_argument("--lab_colorization", action="store_true", help="split input image into brightness (A) and color (B)")
 parser.add_argument("--batch_size", type=int, default=1, help="number of images in batch")
 parser.add_argument("--which_direction", type=str, default="AtoB", choices=["AtoB", "BtoA"])
 parser.add_argument("--ngf", type=int, default=64, help="number of generator filters in first conv layer")
@@ -58,8 +58,16 @@ a = parser.parse_args()
 EPS = 1e-12
 CROP_SIZE = 256
 
+if a.image_height is None:
+    a.image_height = CROP_SIZE
+if a.image_width is None:
+    a.image_width = CROP_SIZE
+
+
 Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch")
 Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, discrim_grads_and_vars, gen_loss_GAN, gen_loss_L1, gen_grads_and_vars, train")
+Pix2Pix2Model = collections.namedtuple("Pix2Pix2Model", "predict_real_X, predict_fake_X, predict_real_Y, predict_fake_Y, discrim_X_loss, discrim_Y_loss, discrim_X_grads_and_vars, discrim_Y_grads_and_vars, gen_G_loss_GAN, gen_F_loss_GAN, forward_cycle_loss_L1, backward_cycle_loss_L1, gen_G_grads_and_vars, gen_F_grads_and_vars, outputs, reverse_outputs, train")
+CycleGANModel = collections.namedtuple("CycleGANModel", "predict_real_X, predict_fake_X, predict_real_Y, predict_fake_Y, discrim_X_loss, discrim_Y_loss, discrim_X_grads_and_vars, discrim_Y_grads_and_vars, gen_G_loss_GAN, gen_F_loss_GAN, forward_cycle_loss_L1, backward_cycle_loss_L1, gen_G_grads_and_vars, gen_F_grads_and_vars, outputs, reverse_outputs, train, cycle_consistency_loss_L1")
 
 
 def preprocess(image):
@@ -71,32 +79,7 @@ def preprocess(image):
 def deprocess(image):
     with tf.name_scope("deprocess"):
         # [-1, 1] => [0, 1]
-        return (image + 1) / 2
-
-
-def preprocess_lab(lab):
-    with tf.name_scope("preprocess_lab"):
-        L_chan, a_chan, b_chan = tf.unstack(lab, axis=2)
-        # L_chan: black and white with input range [0, 100]
-        # a_chan/b_chan: color channels with input range ~[-110, 110], not exact
-        # [0, 100] => [-1, 1],  ~[-110, 110] => [-1, 1]
-        return [L_chan / 50 - 1, a_chan / 110, b_chan / 110]
-
-
-def deprocess_lab(L_chan, a_chan, b_chan):
-    with tf.name_scope("deprocess_lab"):
-        # this is axis=3 instead of axis=2 because we process individual images but deprocess batches
-        return tf.stack([(L_chan + 1) / 2 * 100, a_chan * 110, b_chan * 110], axis=3)
-
-
-def augment(image, brightness):
-    # (a, b) color channels, combine with L channel and convert to rgb
-    a_chan, b_chan = tf.unstack(image, axis=3)
-    L_chan = tf.squeeze(brightness, axis=3)
-    lab = deprocess_lab(L_chan, a_chan, b_chan)
-    rgb = lab_to_rgb(lab)
-    return rgb
-
+        return tf.image.convert_image_dtype((image + 1) / 2, dtype=tf.uint8, saturate=True)
 
 def conv(batch_input, out_channels, size=4, stride=2):
     with tf.variable_scope("conv"):
@@ -160,111 +143,105 @@ def check_image(image):
     image.set_shape(shape)
     return image
 
-# based on https://github.com/torch/image/blob/9f65c30167b2048ecbe8b7befdc6b2d6d12baee9/generic/image.c
-def rgb_to_lab(srgb):
-    with tf.name_scope("rgb_to_lab"):
-        srgb = check_image(srgb)
-        srgb_pixels = tf.reshape(srgb, [-1, 3])
 
-        with tf.name_scope("srgb_to_xyz"):
-            linear_mask = tf.cast(srgb_pixels <= 0.04045, dtype=tf.float32)
-            exponential_mask = tf.cast(srgb_pixels > 0.04045, dtype=tf.float32)
-            rgb_pixels = (srgb_pixels / 12.92 * linear_mask) + (((srgb_pixels + 0.055) / 1.055) ** 2.4) * exponential_mask
-            rgb_to_xyz = tf.constant([
-                #    X        Y          Z
-                [0.412453, 0.212671, 0.019334], # R
-                [0.357580, 0.715160, 0.119193], # G
-                [0.180423, 0.072169, 0.950227], # B
-            ])
-            xyz_pixels = tf.matmul(rgb_pixels, rgb_to_xyz)
-
-        # https://en.wikipedia.org/wiki/Lab_color_space#CIELAB-CIEXYZ_conversions
-        with tf.name_scope("xyz_to_cielab"):
-            # convert to fx = f(X/Xn), fy = f(Y/Yn), fz = f(Z/Zn)
-
-            # normalize for D65 white point
-            xyz_normalized_pixels = tf.multiply(xyz_pixels, [1/0.950456, 1.0, 1/1.088754])
-
-            epsilon = 6/29
-            linear_mask = tf.cast(xyz_normalized_pixels <= (epsilon**3), dtype=tf.float32)
-            exponential_mask = tf.cast(xyz_normalized_pixels > (epsilon**3), dtype=tf.float32)
-            fxfyfz_pixels = (xyz_normalized_pixels / (3 * epsilon**2) + 4/29) * linear_mask + (xyz_normalized_pixels ** (1/3)) * exponential_mask
-
-            # convert to lab
-            fxfyfz_to_lab = tf.constant([
-                #  l       a       b
-                [  0.0,  500.0,    0.0], # fx
-                [116.0, -500.0,  200.0], # fy
-                [  0.0,    0.0, -200.0], # fz
-            ])
-            lab_pixels = tf.matmul(fxfyfz_pixels, fxfyfz_to_lab) + tf.constant([-16.0, 0.0, 0.0])
-
-        return tf.reshape(lab_pixels, tf.shape(srgb))
+# synchronize seed for image operations so that we do the same augmentation operations to both
+# input and output images
+seed = random.randint(0, 2 ** 31 - 1)
 
 
-def lab_to_rgb(lab):
-    with tf.name_scope("lab_to_rgb"):
-        lab = check_image(lab)
-        lab_pixels = tf.reshape(lab, [-1, 3])
+def transform(image):
+    r = image
+    if a.mode == 'train':  # augment image by flipping and cropping
+        if a.flip:
+            r = tf.image.random_flip_left_right(r, seed=seed)
 
-        # https://en.wikipedia.org/wiki/Lab_color_space#CIELAB-CIEXYZ_conversions
-        with tf.name_scope("cielab_to_xyz"):
-            # convert to fxfyfz
-            lab_to_fxfyfz = tf.constant([
-                #   fx      fy        fz
-                [1/116.0, 1/116.0,  1/116.0], # l
-                [1/500.0,     0.0,      0.0], # a
-                [    0.0,     0.0, -1/200.0], # b
-            ])
-            fxfyfz_pixels = tf.matmul(lab_pixels + tf.constant([16.0, 0.0, 0.0]), lab_to_fxfyfz)
+        width = tf.shape(image)[1]  # [height, width, channels]
+        height = tf.shape(image)[0]  # [height, width, channels]
 
-            # convert to xyz
-            epsilon = 6/29
-            linear_mask = tf.cast(fxfyfz_pixels <= epsilon, dtype=tf.float32)
-            exponential_mask = tf.cast(fxfyfz_pixels > epsilon, dtype=tf.float32)
-            xyz_pixels = (3 * epsilon**2 * (fxfyfz_pixels - 4/29)) * linear_mask + (fxfyfz_pixels ** 3) * exponential_mask
+        # resize when image too small to crop, otherwise use original full image
+        r = tf.cond(tf.logical_or(width < a.scale_size, height < a.scale_size),
+                    lambda: tf.image.resize_images(r, [a.scale_size, a.scale_size], method=tf.image.ResizeMethod.AREA),
+                    lambda: r)
 
-            # denormalize for D65 white point
-            xyz_pixels = tf.multiply(xyz_pixels, [0.950456, 1.0, 1.088754])
+        # offset = tf.cast(tf.floor(tf.random_uniform([2], 0, a.scale_size - CROP_SIZE + 1, seed=seed)), dtype=tf.int32)
+        # if a.scale_size > CROP_SIZE:
+        #     r = tf.image.crop_to_bounding_box(r, offset[0], offset[1], CROP_SIZE, CROP_SIZE)
+        # elif a.scale_size < CROP_SIZE:
+        #     raise Exception("scale size cannot be less than crop size")
+        r = tf.random_crop(r, size=[CROP_SIZE, CROP_SIZE, 3], seed=seed)
 
-        with tf.name_scope("xyz_to_srgb"):
-            xyz_to_rgb = tf.constant([
-                #     r           g          b
-                [ 3.2404542, -0.9692660,  0.0556434], # x
-                [-1.5371385,  1.8760108, -0.2040259], # y
-                [-0.4985314,  0.0415560,  1.0572252], # z
-            ])
-            rgb_pixels = tf.matmul(xyz_pixels, xyz_to_rgb)
-            # avoid a slightly negative number messing up the conversion
-            rgb_pixels = tf.clip_by_value(rgb_pixels, 0.0, 1.0)
-            linear_mask = tf.cast(rgb_pixels <= 0.0031308, dtype=tf.float32)
-            exponential_mask = tf.cast(rgb_pixels > 0.0031308, dtype=tf.float32)
-            srgb_pixels = (rgb_pixels * 12.92 * linear_mask) + ((rgb_pixels ** (1/2.4) * 1.055) - 0.055) * exponential_mask
+        r.set_shape([CROP_SIZE, CROP_SIZE, 3])  # must do this if tf.image.resize is not used, otherwise shape unknown
 
-        return tf.reshape(srgb_pixels, tf.shape(lab))
+    else:  # use full sized original image
+        r.set_shape([a.image_height, a.image_width, 3])  # use full size image
+
+    return r
 
 
 def load_examples():
     if a.input_dir is None or not os.path.exists(a.input_dir):
         raise Exception("input_dir does not exist")
 
-    input_paths = glob.glob(os.path.join(a.input_dir, "*.jpg"))
+    if a.input_dir_B is None:   # image pair A and B
+        n_images, a_paths, raw_image = load_images(a.input_dir, 'AB')
+        # break apart image pair and move to range [-1, 1]
+        width = tf.shape(raw_image)[1] # [height, width, channels]
+        a_images = preprocess(raw_image[:,:width//2,:])
+        b_images = preprocess(raw_image[:,width//2:,:])
+        b_paths = a_paths
+        print("examples count = %d (each A and B)" % n_images)
+
+    elif not os.path.exists(a.input_dir_B):  # images B in other directory
+        raise Exception("input_dir_B does not exist")
+    else:  # load A and B images
+        n_a_images, a_paths, raw_a_image = load_images(a.input_dir, 'A')
+        a_images = preprocess(raw_a_image)
+        n_b_images, b_paths, raw_b_image = load_images(a.input_dir_B, 'B')
+        b_images = preprocess(raw_b_image)
+        print("examples count = %d, %d (A, B)" % (n_a_images, n_b_images))
+        n_images = max(n_a_images, n_b_images)
+
+    if a.which_direction == "AtoB":
+        inputs, targets = [a_images, b_images]
+        input_paths, target_paths = [a_paths, b_paths]
+    elif a.which_direction == "BtoA":
+        inputs, targets = [b_images, a_images]
+        input_paths, target_paths = [b_paths, a_paths]
+    else:
+        raise Exception("invalid direction")
+
+    with tf.name_scope("input_images"):
+        input_images = transform(inputs)
+
+    with tf.name_scope("target_images"):
+        target_images = transform(targets)
+
+    if a.model == "CycleGAN":  # unpaired_images
+        input_paths_batch, inputs_batch = tf.train.batch([input_paths, input_images], batch_size=a.batch_size, name="input_batch")
+        target_paths_batch, targets_batch = tf.train.batch([target_paths, target_images], batch_size=a.batch_size, name="target_batch")
+    else:  # paired images
+        input_paths_batch, target_paths_batch, inputs_batch, targets_batch = \
+            tf.train.batch([input_paths, target_paths, input_images, target_images], batch_size=a.batch_size, name="paired_batch")
+
+    steps_per_epoch = int(math.ceil(n_images / a.batch_size))
+
+    return Examples(
+        input_paths=input_paths_batch,
+        target_paths=target_paths_batch,
+        inputs=inputs_batch,
+        targets=targets_batch,
+        steps_per_epoch=steps_per_epoch,
+    )
+
+
+def load_images(input_dir, input_name=''):
+    input_paths = glob.glob(os.path.join(input_dir, "*.jpg"))
     decode = tf.image.decode_jpeg
     if len(input_paths) == 0:
-        input_paths = glob.glob(os.path.join(a.input_dir, "*.png"))
+        input_paths = glob.glob(os.path.join(input_dir, "*.png"))
         decode = tf.image.decode_png
-
-    if len(input_paths) == 0:  # input_dir contains no image files, therefore look for stacks
-        def full_path(name):
-            return os.path.isfile(os.path.join(a.input_dir, name))
-
-        with tf.name_scope("load_stacks"):
-            if full_path('input.tif') and full_path('target.tif'):
-                raise Exception("Multi-Tiff import not implemented")
-            elif full_path('input.tif') and full_path('target.tif'):
-                raise Exception("Hdf5 import not implemented")
-            else:
-                raise Exception("input_dir contains no images (jpg/png) or input and target stacks (multi-tif/hdf5)")
+    if len(input_paths) == 0:
+        raise Exception("%s contains no images (jpg/png)" % input_dir)
     else:
         def get_name(path):
             name, _ = os.path.splitext(os.path.basename(path))
@@ -277,7 +254,7 @@ def load_examples():
         else:
             input_paths = sorted(input_paths)
 
-        with tf.name_scope("load_images"):
+        with tf.name_scope("load_%simages" % input_name):
             path_queue = tf.train.string_input_producer(input_paths, shuffle=a.mode == "train")
             reader = tf.WholeFileReader()
             paths, contents = reader.read(path_queue)
@@ -290,64 +267,7 @@ def load_examples():
 
             raw_input.set_shape([None, None, 3])
 
-            if a.lab_colorization:
-                # load color and brightness from image, no B image exists here
-                lab = rgb_to_lab(raw_input)
-                L_chan, a_chan, b_chan = preprocess_lab(lab)
-                a_images = tf.expand_dims(L_chan, axis=2)
-                b_images = tf.stack([a_chan, b_chan], axis=2)
-            else:
-                # break apart image pair and move to range [-1, 1]
-                width = tf.shape(raw_input)[1] # [height, width, channels]
-                a_images = preprocess(raw_input[:,:width//2,:])
-                b_images = preprocess(raw_input[:,width//2:,:])
-
-    if a.which_direction == "AtoB":
-        inputs, targets = [a_images, b_images]
-    elif a.which_direction == "BtoA":
-        inputs, targets = [b_images, a_images]
-    else:
-        raise Exception("invalid direction")
-
-    # synchronize seed for image operations so that we do the same operations to both
-    # input and output images
-    seed = random.randint(0, 2**31 - 1)
-    def transform(image):
-        r = image
-        if a.flip:
-            r = tf.image.random_flip_left_right(r, seed=seed)
-
-        # area produces a nice downscaling, but does nearest neighbor for upscaling
-        # assume we're going to be doing downscaling here
-        width = tf.shape(raw_input)[1]  # [height, width, channels]
-        # resize when image too small to crop, otherwise use original full image
-        r = tf.cond(width < a.scale_size,
-                    lambda: tf.image.resize_images(r, [a.scale_size, a.scale_size], method=tf.image.ResizeMethod.AREA),
-                    lambda: r)
-
-        offset = tf.cast(tf.floor(tf.random_uniform([2], 0, a.scale_size - CROP_SIZE + 1, seed=seed)), dtype=tf.int32)
-        if a.scale_size > CROP_SIZE:
-            r = tf.image.crop_to_bounding_box(r, offset[0], offset[1], CROP_SIZE, CROP_SIZE)
-        elif a.scale_size < CROP_SIZE:
-            raise Exception("scale size cannot be less than crop size")
-        return r
-
-    with tf.name_scope("input_images"):
-        input_images = transform(inputs)
-
-    with tf.name_scope("target_images"):
-        target_images = transform(targets)
-
-    paths_batch, inputs_batch, targets_batch = tf.train.batch([paths, input_images, target_images], batch_size=a.batch_size)
-    steps_per_epoch = int(math.ceil(len(input_paths) / a.batch_size))
-
-    return Examples(
-        paths=paths_batch,
-        inputs=inputs_batch,
-        targets=targets_batch,
-        count=len(input_paths),
-        steps_per_epoch=steps_per_epoch,
-    )
+    return len(input_paths), paths, raw_input
 
 
 def create_u_net(generator_inputs, generator_outputs_channels):
@@ -621,6 +541,30 @@ def create_pix2pix_model(inputs, targets, generator_name="generator", discrimina
     )
 
 
+def create_pix2pix2_model(X, Y):
+    forward_model = create_pix2pix_model(X, Y, generator_name="G", discriminator_name="D_Y")
+    reverse_model = create_pix2pix_model(Y, X, generator_name="F", discriminator_name="D_X")
+    return Pix2Pix2Model(
+        predict_real_X=reverse_model.predict_real,
+        predict_fake_X=reverse_model.predict_fake,
+        predict_real_Y=forward_model.predict_real,
+        predict_fake_Y=forward_model.predict_fake,
+        discrim_X_loss=reverse_model.discrim_loss,
+        discrim_Y_loss=forward_model.discrim_loss,
+        discrim_X_grads_and_vars=reverse_model.discrim_grads_and_vars,
+        discrim_Y_grads_and_vars=reverse_model.discrim_grads_and_vars,
+        gen_G_loss_GAN=forward_model.gen_loss_GAN,
+        gen_F_loss_GAN=reverse_model.gen_loss_GAN,
+        forward_cycle_loss_L1=forward_model.gen_loss_L1,
+        backward_cycle_loss_L1=reverse_model.gen_loss_L1,
+        gen_G_grads_and_vars=forward_model.gen_grads_and_vars,
+        gen_F_grads_and_vars=reverse_model.gen_grads_and_vars,
+        outputs=forward_model.outputs,
+        reverse_outputs=reverse_model.outputs,
+        train=tf.group(forward_model.train, reverse_model.train)
+    )
+
+
 def create_CycleGAN_model(X, Y):
     # create two generators G and F, one for forward and one for backward translation, each having two copies,
     # one for real images and one for fake images which share the same underlying variables
@@ -691,7 +635,7 @@ def create_CycleGAN_model(X, Y):
         # abs() => 0
         # gen_F_loss_GAN = tf.reduce_mean(-tf.log(predict_fake_X + EPS))
         # gen_F_loss_GAN = -discrim_X_loss
-        gen_F_loss_GAN = loss(predict_fake_X, predict_real_X)
+        gen_F_loss_GAN = loss_generator(discrim_X_loss, predict_fake_X, predict_real_X)
         gen_F_loss = gen_F_loss_GAN * a.gan_weight + cycle_consistency_loss_L1 * a.l1_weight
 
     # train discriminators
@@ -728,59 +672,38 @@ def create_CycleGAN_model(X, Y):
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
     update_losses = ema.apply([discrim_X_loss, discrim_Y_loss,
                                gen_G_loss_GAN, gen_F_loss_GAN,
+                               forward_loss_L1, backward_loss_L1,
                                cycle_consistency_loss_L1])
 
     global_step = tf.contrib.framework.get_or_create_global_step()
     incr_global_step = tf.assign(global_step, global_step+1)
 
-    # Returning all the summaries would look like:
-    #
-    # return Model(
-    #     predict_real_X=predict_real_X,
-    #     predict_fake_X=predict_fake_X,
-    #     predict_real_Y=predict_real_Y,
-    #     predict_fake_Y=predict_fake_Y,
-    #     discrim_X_loss=ema.average(discrim_X_loss),
-    #     discrim_Y_loss=ema.average(discrim_Y_loss),
-    #     discrim_X_grads_and_vars=discrim_X_grads_and_vars,
-    #     discrim_Y_grads_and_vars=discrim_Y_grads_and_vars,
-    #     gen_G_loss_GAN=ema.average(gen_G_loss_GAN),
-    #     gen_F_loss_GAN=ema.average(gen_F_loss_GAN),
-    #     forward_cycle_loss_L1=ema.average(forward_loss_L1),
-    #     backward_cycle_loss_L1=ema.average(backward_loss_L1),
-    #     cycle_consistency_loss_L1=ema.average(cycle_consistency_loss_L1),
-    #     gen_G_grads_and_vars=gen_G_grads_and_vars,
-    #     gen_F_grads_and_vars=gen_F_grads_and_vars,
-    #     outputs=fake_Y,
-    #     train=tf.group(update_losses, incr_global_step, gen_G_train),
-    # )
-
-    # The following results in a TypeError: can only concatenate tuple (not "int") to tuple
-    # in the function deprocess:  return (image + 1) / 2
-    # return Model(
-    #     predict_real=(predict_real_Y, predict_real_X),
-    #     predict_fake=(predict_fake_Y, predict_fake_X),
-    #     discrim_loss=(ema.average(discrim_Y_loss), ema.average(discrim_X_loss)),
-    #     discrim_grads_and_vars=(discrim_Y_grads_and_vars, discrim_X_grads_and_vars),
-    #     gen_loss_GAN=(ema.average(gen_G_loss_GAN),ema.average(gen_F_loss_GAN)),
-    #     gen_loss_L1=ema.average(cycle_consistency_loss_L1),
-    #     gen_grads_and_vars=(gen_G_grads_and_vars, gen_F_grads_and_vars),
-    #     outputs=(fake_Y,fake_X),
-    #     train=tf.group(update_losses, incr_global_step, gen_G_train),
-    # )
-
-    # TODO: refactor return in Pix2Pix to allow complete summaries for CycleGAN as well
-    return Model(
-        predict_real=predict_real_Y,
-        predict_fake=predict_fake_Y,
-        discrim_loss=ema.average(discrim_Y_loss),
-        discrim_grads_and_vars=discrim_Y_grads_and_vars,
-        gen_loss_GAN=ema.average(gen_G_loss_GAN),
-        gen_loss_L1=ema.average(cycle_consistency_loss_L1),
-        gen_grads_and_vars=gen_G_grads_and_vars,
+    return CycleGANModel(
+        predict_real_X=predict_real_X,
+        predict_fake_X=predict_fake_X,
+        predict_real_Y=predict_real_Y,
+        predict_fake_Y=predict_fake_Y,
+        discrim_X_loss=ema.average(discrim_X_loss),
+        discrim_Y_loss=ema.average(discrim_Y_loss),
+        discrim_X_grads_and_vars=discrim_X_grads_and_vars,
+        discrim_Y_grads_and_vars=discrim_Y_grads_and_vars,
+        gen_G_loss_GAN=ema.average(gen_G_loss_GAN),
+        gen_F_loss_GAN=ema.average(gen_F_loss_GAN),
+        forward_cycle_loss_L1=ema.average(forward_loss_L1),
+        backward_cycle_loss_L1=ema.average(backward_loss_L1),
+        gen_G_grads_and_vars=gen_G_grads_and_vars,
+        gen_F_grads_and_vars=gen_F_grads_and_vars,
         outputs=fake_Y,
-        train=tf.group(update_losses, incr_global_step, gen_G_train),
+        reverse_outputs=fake_X,
+        train=tf.group(update_losses, incr_global_step, gen_G_train, gen_F_train),
+        cycle_consistency_loss_L1=ema.average(cycle_consistency_loss_L1),
     )
+
+
+if a.model =="pix2pix":
+    image_kinds = ["inputs", "outputs", "targets"]
+else:
+    image_kinds = ["inputs", "reverse_outputs", "outputs", "targets"]
 
 
 def save_images(fetches, step=None):
@@ -789,10 +712,14 @@ def save_images(fetches, step=None):
         os.makedirs(image_dir)
 
     filesets = []
-    for i, in_path in enumerate(fetches["paths"]):
+    for i, in_path in enumerate(fetches["input_paths"]):
         name, _ = os.path.splitext(os.path.basename(in_path.decode("utf8")))
         fileset = {"name": name, "step": step}
-        for kind in ["inputs", "outputs", "targets"]:
+        if not a.model == 'pix2pix':
+            target_path =  fetches["target_paths"][i]
+            name2, _ = os.path.splitext(os.path.basename(target_path.decode("utf8")))
+            fileset["name2"] = name2
+        for kind in image_kinds:
             filename = name + "-" + kind + ".png"
             if step is not None:
                 filename = "%08d-%s" % (step, filename)
@@ -814,7 +741,10 @@ def append_index(filesets, step=False):
         index.write("<html><body><table><tr>")
         if step:
             index.write("<th>step</th>")
-        index.write("<th>name</th><th>input</th><th>output</th><th>target</th></tr>")
+        if a.model == 'pix2pix':
+            index.write("<th>name</th><th>input</th><th>output</th><th>target</th></tr>")
+        else:
+            index.write("<th>name</th><th>input</th><th>reverse_output</th><th>output</th><th>target</th><th>name</th></tr>")
 
     for fileset in filesets:
         index.write("<tr>")
@@ -823,8 +753,11 @@ def append_index(filesets, step=False):
             index.write("<td>%d</td>" % fileset["step"])
         index.write("<td>%s</td>" % fileset["name"])
 
-        for kind in ["inputs", "outputs", "targets"]:
+        for kind in image_kinds:
             index.write("<td><img src='images/%s'></td>" % fileset[kind])
+
+        if not a.model == 'pix2pix':
+            index.write("<td>%s</td>" % fileset["name2"])
 
         index.write("</tr>")
     return index_path
@@ -855,9 +788,6 @@ def main():
                 if key in options:
                     print("loaded", key, "=", val)
                     setattr(a, key, val)
-        # disable these features in test mode
-        a.scale_size = CROP_SIZE
-        a.flip = False
 
     for k, v in a._get_kwargs():
         print(k, "=", v)
@@ -923,87 +853,54 @@ def main():
         return
 
     examples = load_examples()
-    print("examples count = %d" % examples.count)
 
     # inputs and targets are [batch_size, height, width, channels]
     if a.model == 'pix2pix':
         model = create_pix2pix_model(examples.inputs, examples.targets)
+    elif a.model == 'pix2pix2':
+        model = create_pix2pix2_model(examples.inputs, examples.targets)
     elif a.model == 'CycleGAN':
         model = create_CycleGAN_model(examples.inputs, examples.targets)
 
-    # undo colorization splitting on images that we use for display/output
-    if a.lab_colorization:
-        if a.which_direction == "AtoB":
-            # inputs is brightness, this will be handled fine as a grayscale image
-            # need to augment targets and outputs with brightness
-            targets = augment(examples.targets, examples.inputs)
-            outputs = augment(model.outputs, examples.inputs)
-            # inputs can be deprocessed normally and handled as if they are single channel
-            # grayscale images
-            inputs = deprocess(examples.inputs)
-        elif a.which_direction == "BtoA":
-            # inputs will be color channels only, get brightness from targets
-            inputs = augment(examples.inputs, examples.targets)
-            targets = deprocess(examples.targets)
-            outputs = deprocess(model.outputs)
-        else:
-            raise Exception("invalid direction")
-    else:
-        inputs = deprocess(examples.inputs)
-        targets = deprocess(examples.targets)
-        outputs = deprocess(model.outputs)
-
-    def convert(image):
-        if a.aspect_ratio != 1.0:
-            # upscale to correct aspect ratio
-            size = [CROP_SIZE, int(round(CROP_SIZE * a.aspect_ratio))]
-            image = tf.image.resize_images(image, size=size, method=tf.image.ResizeMethod.BICUBIC)
-
-        return tf.image.convert_image_dtype(image, dtype=tf.uint8, saturate=True)
-
-    # reverse any processing on images so they can be written to disk or displayed to user
-    with tf.name_scope("convert_inputs"):
-        converted_inputs = convert(inputs)
-
-    with tf.name_scope("convert_targets"):
-        converted_targets = convert(targets)
-
-    with tf.name_scope("convert_outputs"):
-        converted_outputs = convert(outputs)
-
+    # encoding images for saving
     with tf.name_scope("encode_images"):
-        display_fetches = {
-            "paths": examples.paths,
-            "inputs": tf.map_fn(tf.image.encode_png, converted_inputs, dtype=tf.string, name="input_pngs"),
-            "targets": tf.map_fn(tf.image.encode_png, converted_targets, dtype=tf.string, name="target_pngs"),
-            "outputs": tf.map_fn(tf.image.encode_png, converted_outputs, dtype=tf.string, name="output_pngs"),
-        }
+        display_fetches = {}
+        for name, value in examples._asdict().iteritems():
+            if "path" in name:
+                display_fetches[name] = value
+            elif tf.is_numeric_tensor(value):
+                display_fetches[name] = tf.map_fn(tf.image.encode_png, deprocess(value), dtype=tf.string, name=name+"_pngs")
+        for name, value in model._asdict().iteritems():
+            if tf.is_numeric_tensor(value) and "predict_" not in name:
+                display_fetches[name] = tf.map_fn(tf.image.encode_png, deprocess(value), dtype=tf.string, name=name+"_pngs")
 
-    # summaries
-    with tf.name_scope("inputs_summary"):
-        tf.summary.image("inputs", converted_inputs)
+    # progress report for all losses
+    with tf.name_scope("progress_summary"):
+        progress_fetches = {}
+        for name, value in model._asdict().iteritems():
+            if not tf.is_numeric_tensor(value) and "grads_and_vars" not in name and not name == "train":
+                progress_fetches[name] = value
 
-    with tf.name_scope("targets_summary"):
-        tf.summary.image("targets", converted_targets)
-
-    with tf.name_scope("outputs_summary"):
-        tf.summary.image("outputs", converted_outputs)
-
-    with tf.name_scope("predict_real_summary"):
-        tf.summary.image("predict_real", tf.image.convert_image_dtype(model.predict_real, dtype=tf.uint8))
-
-    with tf.name_scope("predict_fake_summary"):
-        tf.summary.image("predict_fake", tf.image.convert_image_dtype(model.predict_fake, dtype=tf.uint8))
-
-    tf.summary.scalar("discriminator_loss", model.discrim_loss)
-    tf.summary.scalar("generator_loss_GAN", model.gen_loss_GAN)
-    tf.summary.scalar("generator_loss_L1", model.gen_loss_L1)
+    # summaries for model: images, scalars, histograms
+    for name, value in examples._asdict().iteritems():
+        if tf.is_numeric_tensor(value):
+            with tf.name_scope(name + "_summary"):
+                tf.summary.image(name, deprocess(value))
+    for name, value in model._asdict().iteritems():
+        if tf.is_numeric_tensor(value):
+            with tf.name_scope(name + "_summary"):
+                if "predict_" in name:    # discriminators produce values in [0, 1]
+                    tf.summary.image(name, tf.image.convert_image_dtype(value, dtype=tf.uint8))
+                else:   # generators produce values in [-1, 1]
+                    tf.summary.image(name, deprocess(value))
+        elif "grads_and_vars" in name:
+            for grad, var in value:
+                tf.summary.histogram(var.op.name + "/gradients", grad)
+        elif not name == "train":
+            tf.summary.scalar(name, value)
 
     for var in tf.trainable_variables():
         tf.summary.histogram(var.op.name + "/values", var)
-
-    for grad, var in model.discrim_grads_and_vars + model.gen_grads_and_vars:
-        tf.summary.histogram(var.op.name + "/gradients", grad)
 
     with tf.name_scope("parameter_count"):
         parameter_count = tf.reduce_sum([tf.reduce_prod(tf.shape(v)) for v in tf.trainable_variables()])
@@ -1066,9 +963,7 @@ def main():
                 }
 
                 if should(a.progress_freq):
-                    fetches["discrim_loss"] = model.discrim_loss
-                    fetches["gen_loss_GAN"] = model.gen_loss_GAN
-                    fetches["gen_loss_L1"] = model.gen_loss_L1
+                    fetches["progress"] = progress_fetches
 
                 if should(a.summary_freq):
                     fetches["summary"] = sv.summary_op
@@ -1098,9 +993,8 @@ def main():
                     rate = (step + 1) * a.batch_size / (time.time() - start)
                     remaining = (max_steps - step) * a.batch_size / rate
                     print("progress  epoch %d  step %d  image/sec %0.1f  remaining %dm" % (train_epoch, train_step, rate, remaining / 60))
-                    print("discrim_loss", results["discrim_loss"])
-                    print("gen_loss_GAN", results["gen_loss_GAN"])
-                    print("gen_loss_L1", results["gen_loss_L1"])
+                    for name, value in results["progress"].iteritems():
+                        print (name, value)
 
                 if should(a.save_freq):
                     print("saving model")

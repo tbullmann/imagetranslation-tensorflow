@@ -2,8 +2,8 @@
 
 This is my ongoing tensorflow implementation for unpaired image-to-image translation ([Zhu et al., 2017](https://arxiv.org/pdf/1703.10593.pdf)). 
 
-Latest results can be found here, [comparing](docs/run_1.md) paired and unpaired image-to-image translation as well as the showing the transfer of pre-trained networks [transfer of pre-trained networks](docs/run_1.md) between them.
-
+Latest results can be found here, [comparing](docs/run_1.md) paired and unpaired image-to-image translation.
+ 
 Image-to-image translation learns a mapping from input images to output images, like these examples from the original papers: 
 
 #### CycleGAN: [[Project]](https://junyanz.github.io/CycleGAN/) [[Paper]](https://arxiv.org/pdf/1703.10593.pdf) [[Torch]](https://github.com/junyanz/CycleGAN)
@@ -79,46 +79,35 @@ If you wish to write in-progress pictures as the network is training, use ```--d
 
 ### Finish CycleGAN implementation according to publication Hu et al., 2017
 Major issues
-- replace the negative log likelihood objective by a least square loss 
 - add instance normalization ([Ulyanov D et al., 2016](https://arxiv.org/abs/1607.08022))
-- update discriminators using a history of generated images by adding image buffer that stores the 50 previous image
+- add image buffer that stores the previous image (to update discriminators using a history of 50 generated images)
 Minor issues
 - flexible learning rate for the Adams solver
-- unpair images for testing CycleGAN
 - add one-direction test mode for CycleGAN
 - add identity loss
-- add flexibility to padding layers, e.g. reflection as well
-
-### Merge paired and unpaired translastion
-- refactor summary to work for both Pix2Pix and CycleGAN
-- add dropout layers to faststyle net
 
 ### Import and export
-- add import of images from different subdirectories, and of image stacks from multi-tiff and hdf5
 - images with arbitrary height width and color channels (input/target)
-- add mask for unlabeled regions (modify last layer in discriminator (32x32) and L1 loss layer (256x256) before tf.reduce_mean), e.g. here:
-```python
-  discrim_loss = tf.reduce_mean(-(tf.log(predict_real + EPS) + tf.log(1 - predict_fake + EPS)))
-  # ....
-  gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
-  gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
-        
-```
+- add mask for unlabeled regions (by restricting losses to labeled regions)
 - add more preprocessing options for augmentation
 - move lab_colorization(split input image into brightness and color)
 
 ### Testing
+- test transfer learning from Pix2Pix2 to CycleGAN
 - fully test CPU mode and multi-GPU mode
 - add different generators 
 
 ### Other
 - resize-convolution on top of deconvolution for better upsampling ([Odena et al., 2016](http://distill.pub/2016/deconv-checkerboard/))
+- add dropout layers to faststyle net
 
 ## Done
 - test CycleGAN with u-net generator and log loss and compare with pix2pix: [OK](docs/run_1.md) 
 - test CycleGAN with faststyle-net generator and log loss: [OK](docs/run_1.md) 
-- proper loss function for generator (maximising discriminator loss) and optional square loss
-- test Pix2Pix2 model, transfer checkpoint to CycleGAN: [OK](docs/run_2.md) 
+- square loss and several options for loss function for generator (maximising discriminator loss, ...)
+- refactor summary and export of images to work for all models: Pix2Pix, CycleGAN, Pix2Pix2
+- two batches delivering unpaired images for CycleGAN
+- import of images from different subdirectories
 
 ## Acknowledgement
 
