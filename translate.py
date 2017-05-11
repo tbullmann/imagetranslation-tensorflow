@@ -64,9 +64,9 @@ if a.image_width is None:
     a.image_width = CROP_SIZE
 
 
-Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch")
+Examples = collections.namedtuple("Examples", "input_paths, target_paths, inputs, targets, steps_per_epoch")
 Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, discrim_grads_and_vars, gen_loss_GAN, gen_loss_L1, gen_grads_and_vars, train")
-Pix2Pix2Model = collections.namedtuple("Pix2Pix2Model", "predict_real_X, predict_fake_X, predict_real_Y, predict_fake_Y, discrim_X_loss, discrim_Y_loss, discrim_X_grads_and_vars, discrim_Y_grads_and_vars, gen_G_loss_GAN, gen_F_loss_GAN, forward_cycle_loss_L1, backward_cycle_loss_L1, gen_G_grads_and_vars, gen_F_grads_and_vars, outputs, reverse_outputs, train")
+Pix2Pix2Model = collections.namedtuple("Pix2Pix2Model", "predict_real_X, predict_fake_X, predict_real_Y, predict_fake_Y, discrim_X_loss, discrim_Y_loss, discrim_X_grads_and_vars, discrim_Y_grads_and_vars, gen_G_loss_GAN, gen_F_loss_GAN, gen_G_loss_L1, gen_F_loss_L1, gen_G_grads_and_vars, gen_F_grads_and_vars, outputs, reverse_outputs, train")
 CycleGANModel = collections.namedtuple("CycleGANModel", "predict_real_X, predict_fake_X, predict_real_Y, predict_fake_Y, discrim_X_loss, discrim_Y_loss, discrim_X_grads_and_vars, discrim_Y_grads_and_vars, gen_G_loss_GAN, gen_F_loss_GAN, forward_cycle_loss_L1, backward_cycle_loss_L1, gen_G_grads_and_vars, gen_F_grads_and_vars, outputs, reverse_outputs, train, cycle_consistency_loss_L1")
 
 
@@ -555,8 +555,8 @@ def create_pix2pix2_model(X, Y):
         discrim_Y_grads_and_vars=reverse_model.discrim_grads_and_vars,
         gen_G_loss_GAN=forward_model.gen_loss_GAN,
         gen_F_loss_GAN=reverse_model.gen_loss_GAN,
-        forward_cycle_loss_L1=forward_model.gen_loss_L1,
-        backward_cycle_loss_L1=reverse_model.gen_loss_L1,
+        gen_G_loss_L1=forward_model.gen_loss_L1,
+        gen_F_loss_L1=reverse_model.gen_loss_L1,
         gen_G_grads_and_vars=forward_model.gen_grads_and_vars,
         gen_F_grads_and_vars=reverse_model.gen_grads_and_vars,
         outputs=forward_model.outputs,
