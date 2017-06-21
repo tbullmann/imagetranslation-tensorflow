@@ -3,6 +3,7 @@ from __future__ import division
 from __future__ import print_function
 
 import tensorflow as tf
+import tensorflow.contrib.slim as slim
 import numpy as np
 import argparse
 import os
@@ -20,8 +21,7 @@ parser.add_argument("--input_dir_B", help="path to folder containing images")
 parser.add_argument("--image_height", help="image height")
 parser.add_argument("--image_width", help="image width")
 parser.add_argument("--model", required=True, choices=["pix2pix", "pix2pix2", "CycleGAN"])
-parser.add_argument("--generator", default="unet", choices=["unet", "faststyle"])
-parser.add_argument("--res_blocks", default="9", help="number of residual blocks in faststyle net")
+parser.add_argument("--generator", default="unet", choices=["unet", "resnet", "highwaynet", "densenet"])
 parser.add_argument("--mode", required=True, choices=["train", "test", "export"])
 parser.add_argument("--output_dir", required=True, help="where to put output files")
 parser.add_argument("--seed", type=int)
@@ -29,6 +29,8 @@ parser.add_argument("--checkpoint", default=None, help="directory with checkpoin
 parser.add_argument("--restore", default="model", choices=["all", "generators"])
 parser.add_argument("--loss", default="log", choices=["log", "square"])
 parser.add_argument("--gen_loss", default="fake", choices=["fake", "negative", "contra"])
+parser.add_argument("--X_type", default="image",  choices=["image", "label"])
+parser.add_argument("--Y_type", default="image",  choices=["image", "label"])
 
 parser.add_argument("--max_steps", type=int, help="number of training steps (0 to disable)")
 parser.add_argument("--max_epochs", type=int, help="number of training epochs")
@@ -48,7 +50,7 @@ parser.add_argument("--no_flip", dest="flip", action="store_false", help="don't 
 parser.set_defaults(flip=True)
 parser.add_argument("--lr", type=float, default=0.0002, help="initial learning rate for adam")
 parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of adam")
-parser.add_argument("--l1_weight", type=float, default=100.0, help="weight on L1 term for generator gradient")
+parser.add_argument("--classic_weight", type=float, default=100.0, help="weight on L1 term for generator gradient")
 parser.add_argument("--gan_weight", type=float, default=1.0, help="weight on GAN term for generator gradient")
 
 # export options
@@ -65,21 +67,25 @@ if a.image_width is None:
 
 
 Examples = collections.namedtuple("Examples", "input_paths, target_paths, inputs, targets, steps_per_epoch")
-Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, discrim_grads_and_vars, gen_loss_GAN, gen_loss_L1, gen_grads_and_vars, train")
-Pix2Pix2Model = collections.namedtuple("Pix2Pix2Model", "predict_real_X, predict_fake_X, predict_real_Y, predict_fake_Y, discrim_X_loss, discrim_Y_loss, discrim_X_grads_and_vars, discrim_Y_grads_and_vars, gen_G_loss_GAN, gen_F_loss_GAN, gen_G_loss_L1, gen_F_loss_L1, gen_G_grads_and_vars, gen_F_grads_and_vars, outputs, reverse_outputs, train")
-CycleGANModel = collections.namedtuple("CycleGANModel", "predict_real_X, predict_fake_X, predict_real_Y, predict_fake_Y, discrim_X_loss, discrim_Y_loss, discrim_X_grads_and_vars, discrim_Y_grads_and_vars, gen_G_loss_GAN, gen_F_loss_GAN, forward_cycle_loss_L1, backward_cycle_loss_L1, gen_G_grads_and_vars, gen_F_grads_and_vars, outputs, reverse_outputs, train, cycle_consistency_loss_L1")
+Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, discrim_grads_and_vars, gen_loss_GAN, gen_loss_classic, gen_grads_and_vars, train")
+Pix2Pix2Model = collections.namedtuple("Pix2Pix2Model", "predict_real_X, predict_fake_X, predict_real_Y, predict_fake_Y, discrim_X_loss, discrim_Y_loss, discrim_X_grads_and_vars, discrim_Y_grads_and_vars, gen_G_loss_GAN, gen_F_loss_GAN, gen_G_loss_classic, gen_F_loss_classic, gen_G_grads_and_vars, gen_F_grads_and_vars, outputs, reverse_outputs, train")
+CycleGANModel = collections.namedtuple("CycleGANModel", "predict_real_X, predict_fake_X, predict_real_Y, predict_fake_Y, discrim_X_loss, discrim_Y_loss, discrim_X_grads_and_vars, discrim_Y_grads_and_vars, gen_G_loss_GAN, gen_F_loss_GAN, forward_cycle_loss_classic, backward_cycle_loss_classic, gen_G_grads_and_vars, gen_F_grads_and_vars, outputs, reverse_outputs, train, cycle_consistency_loss_classic")
 
 
 def preprocess(image):
     with tf.name_scope("preprocess"):
         # [0, 1] => [-1, 1]
         return image * 2 - 1
+        # TODO revert to original and add deprocess [-1, 1] => [0, 1] before cross entropy loss only
+        # return image   # works for labels!
 
 
 def deprocess(image):
     with tf.name_scope("deprocess"):
         # [-1, 1] => [0, 1]
         return tf.image.convert_image_dtype((image + 1) / 2, dtype=tf.uint8, saturate=True)
+        # return tf.image.convert_image_dtype(image , dtype=tf.uint8, saturate=True)   # works for labels!
+
 
 def conv(batch_input, out_channels, size=4, stride=2):
     with tf.variable_scope("conv"):
@@ -103,6 +109,11 @@ def lrelu(x, a):
         # this block looks like it has 2 inputs on the graph unless we do this
         x = tf.identity(x)
         return (0.5 * (1 + a)) * x + (0.5 * (1 - a)) * tf.abs(x)
+
+
+def noise(input, std):
+    gaussian_noise = tf.random_normal(shape=tf.shape(input), mean=0.0, stddev=std, dtype=tf.float32)
+    return input + gaussian_noise
 
 
 def batchnorm(input):
@@ -145,11 +156,12 @@ def check_image(image):
 
 
 # synchronize seed for image operations so that we do the same augmentation operations to both
-# input and output images
-seed = random.randint(0, 2 ** 31 - 1)
+# input and output images, but only if not CycleGAN
+seed_for_random_cropping_X = random.randint(0, 2 ** 31 - 1)
+seed_for_random_cropping_Y = random.randint(0, 2 ** 31 - 1) if a.model == "CycleGAN" else seed_for_random_cropping_X
 
 
-def transform(image):
+def transform(image, seed):
     r = image
     if a.mode == 'train':  # augment image by flipping and cropping
         if a.flip:
@@ -211,10 +223,10 @@ def load_examples():
         raise Exception("invalid direction")
 
     with tf.name_scope("input_images"):
-        input_images = transform(inputs)
+        input_images = transform(inputs, seed=seed_for_random_cropping_X)
 
     with tf.name_scope("target_images"):
-        target_images = transform(targets)
+        target_images = transform(targets, seed=seed_for_random_cropping_Y)
 
     if a.model == "CycleGAN":  # unpaired_images
         input_paths_batch, inputs_batch = tf.train.batch([input_paths, input_images], batch_size=a.batch_size, name="input_batch")
@@ -338,9 +350,8 @@ def create_u_net(generator_inputs, generator_outputs_channels):
     return layers[-1]
 
 
-def create_faststyle_net(generator_inputs, generator_outputs_channels, n_res_blocks=9):
+def create_res_net(generator_inputs, generator_outputs_channels, n_res_blocks=9, ngf=32):
     layers = []
-    ngf = 32
 
     # encoder_1 = c7s1 - 32: [batch, 256, 256, in_channels] => [batch, 256, 256, ngf]
     with tf.variable_scope("encoder_1"):
@@ -395,11 +406,83 @@ def create_faststyle_net(generator_inputs, generator_outputs_channels, n_res_blo
     return layers[-1]
 
 
+def create_highway_net(generator_inputs, generator_outputs_channels, total_layers=25,  skipped_layers = 5, ngf = 64):
+    """
+    From https://chatbotslife.com/resnets-highwaynets-and-densenets-oh-my-9bb15918ee32
+    :param generator_inputs:
+    :param generator_outputs_channels:
+    :param total_layers:
+    :param skipped_layers:
+    :param ngf:
+    :return:
+    """
+    units_between_stride = total_layers // skipped_layers
+
+    def highwayUnit(input_layer, i):
+        with tf.variable_scope("highway_unit" + str(i)):
+            H = slim.conv2d(input_layer, ngf, [3, 3])
+            T = slim.conv2d(input_layer, ngf, [3, 3],
+                            # We initialize with a negative bias to push the network to use the skip connection
+                            biases_initializer=tf.constant_initializer(-1.0), activation_fn=tf.nn.sigmoid)
+            output = H * T + input_layer * (1.0 - T)
+            return output
+
+    # tf.reset_default_graph()
+
+    layer1 = slim.conv2d(generator_inputs, ngf, [3, 3], normalizer_fn=slim.batch_norm, scope='conv_' + str(0))
+    for i in range(5):
+        for j in range(units_between_stride):
+            layer1 = highwayUnit(layer1, j + (i * units_between_stride))
+        layer1 = slim.conv2d(layer1, ngf, [3, 3], stride=[2, 2], normalizer_fn=slim.batch_norm, scope='conv_s_' + str(i))
+
+    top = slim.conv2d(layer1, generator_outputs_channels, [3, 3], normalizer_fn=slim.batch_norm, activation_fn=None, scope='conv_top')
+
+    return top
+
+
+def create_dense_net(generator_inputs, generator_outputs_channels, total_layers=25,  skipped_layers = 5, ngf=64):
+    """
+    From https://chatbotslife.com/resnets-highwaynets-and-densenets-oh-my-9bb15918ee32
+    :param generator_inputs:
+    :param generator_outputs_channels:
+    :param total_layers:
+    :param skipped_layers:
+    :param ngf:
+    :return:
+    """
+    units_between_stride = total_layers / skipped_layers
+
+    def denseBlock(input_layer, i, j):
+        with tf.variable_scope("dense_unit" + str(i)):
+            nodes = []
+            a = slim.conv2d(input_layer, ngf, [3, 3], normalizer_fn=slim.batch_norm)
+            nodes.append(a)
+            for z in range(j):
+                b = slim.conv2d(tf.concat(3, nodes), ngf, [3, 3], normalizer_fn=slim.batch_norm)
+                nodes.append(b)
+            return b
+
+    # tf.reset_default_graph()
+
+    layer1 = slim.conv2d(generator_inputs, ngf, [3, 3], normalizer_fn=slim.batch_norm, scope='conv_' + str(0))
+    for i in range(5):
+        layer1 = denseBlock(layer1, i, units_between_stride)
+        layer1 = slim.conv2d(layer1, ngf, [3, 3], stride=[2, 2], normalizer_fn=slim.batch_norm, scope='conv_s_' + str(i))
+
+    top = slim.conv2d(layer1, generator_outputs_channels, [3, 3], normalizer_fn=slim.batch_norm, activation_fn=None, scope='conv_top')
+
+    return top
+
+
+
 if a.generator == 'unet':
     create_generator = create_u_net
-elif a.generator == 'faststyle':
-    create_generator = create_faststyle_net
-
+elif a.generator == 'resnet':
+    create_generator = create_res_net
+elif a.generator == 'highwaynet':
+    create_generator = create_highway_net
+elif a.generator == 'densenet':
+    create_generator = create_dense_net
 
 def create_discriminator(input):
     n_layers = 3
@@ -462,7 +545,7 @@ elif a.loss == "square":
     loss = square_loss
 
 
-def loss_generator(discrim_loss, fake, real):
+def GAN_loss(discrim_loss, fake, real):
     if a.gen_loss == 'fake':
         if a.loss == "log":
             # original implementation: negative log loss on fake only
@@ -479,7 +562,19 @@ def loss_generator(discrim_loss, fake, real):
     return result
 
 
-def create_pix2pix_model(inputs, targets, generator_name="generator", discriminator_name="discriminator"):
+def classic_loss(outputs, targets, target_type):
+    if target_type == "image":  # Absolute value loss / L1 loss
+        gen_loss_classic = tf.reduce_mean(tf.abs(targets - outputs))
+    elif target_type == "label":  # Cross entropy loss
+        # [-1,+1] ==> [0, 1] for labels
+        gen_loss_classic = tf.reduce_mean(tf.losses.softmax_cross_entropy(targets/2+0.5, outputs/2+0.5))
+    else:
+        raise ValueError("Unknown target type", target_type)
+    return gen_loss_classic
+
+
+def create_pix2pix_model(inputs, targets,
+                         generator_name="generator", discriminator_name="discriminator", target_type=a.X_type):
     with tf.variable_scope(generator_name) as scope:
         out_channels = int(targets.get_shape()[-1])
         outputs = create_generator(inputs, out_channels)
@@ -505,9 +600,9 @@ def create_pix2pix_model(inputs, targets, generator_name="generator", discrimina
         discrim_loss = loss(predict_real, predict_fake)
 
     with tf.name_scope("loss_"+generator_name):
-        gen_loss_GAN = loss_generator (discrim_loss, predict_fake, predict_real)
-        gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
-        gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
+        gen_loss_GAN = GAN_loss (discrim_loss, predict_fake, predict_real)
+        gen_loss_classic = classic_loss(outputs, targets, target_type)
+        gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_classic * a.classic_weight
 
     with tf.name_scope("train_"+discriminator_name):
         discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith(discriminator_name)]
@@ -523,7 +618,7 @@ def create_pix2pix_model(inputs, targets, generator_name="generator", discrimina
             gen_train = gen_optim.apply_gradients(gen_grads_and_vars)
 
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
-    update_losses = ema.apply([discrim_loss, gen_loss_GAN, gen_loss_L1])
+    update_losses = ema.apply([discrim_loss, gen_loss_GAN, gen_loss_classic])
 
     global_step = tf.contrib.framework.get_or_create_global_step()
     incr_global_step = tf.assign(global_step, global_step+1)
@@ -534,7 +629,7 @@ def create_pix2pix_model(inputs, targets, generator_name="generator", discrimina
         discrim_loss=ema.average(discrim_loss),
         discrim_grads_and_vars=discrim_grads_and_vars,
         gen_loss_GAN=ema.average(gen_loss_GAN),
-        gen_loss_L1=ema.average(gen_loss_L1),
+        gen_loss_classic=ema.average(gen_loss_classic),
         gen_grads_and_vars=gen_grads_and_vars,
         outputs=outputs,
         train=tf.group(update_losses, incr_global_step, gen_train),
@@ -542,8 +637,10 @@ def create_pix2pix_model(inputs, targets, generator_name="generator", discrimina
 
 
 def create_pix2pix2_model(X, Y):
-    forward_model = create_pix2pix_model(X, Y, generator_name="G", discriminator_name="D_Y")
-    reverse_model = create_pix2pix_model(Y, X, generator_name="F", discriminator_name="D_X")
+    forward_model = create_pix2pix_model(X, Y,
+                                         generator_name="G", discriminator_name="D_Y", target_type=a.Y_type)
+    reverse_model = create_pix2pix_model(Y, X,
+                                         generator_name="F", discriminator_name="D_X", target_type=a.X_type)
     return Pix2Pix2Model(
         predict_real_X=reverse_model.predict_real,
         predict_fake_X=reverse_model.predict_fake,
@@ -555,8 +652,8 @@ def create_pix2pix2_model(X, Y):
         discrim_Y_grads_and_vars=reverse_model.discrim_grads_and_vars,
         gen_G_loss_GAN=forward_model.gen_loss_GAN,
         gen_F_loss_GAN=reverse_model.gen_loss_GAN,
-        gen_G_loss_L1=forward_model.gen_loss_L1,
-        gen_F_loss_L1=reverse_model.gen_loss_L1,
+        gen_G_loss_classic=forward_model.gen_loss_classic,
+        gen_F_loss_classic=reverse_model.gen_loss_classic,
         gen_G_grads_and_vars=forward_model.gen_grads_and_vars,
         gen_F_grads_and_vars=reverse_model.gen_grads_and_vars,
         outputs=forward_model.outputs,
@@ -619,24 +716,24 @@ def create_CycleGAN_model(X, Y):
 
     # define cycle_consistency loss, one for foward one for backward
     with tf.name_scope("loss_cycle_consistency"):
-        forward_loss_L1 = tf.reduce_mean(tf.abs(X - fake_X_from_fake_Y))
-        backward_loss_L1 = tf.reduce_mean(tf.abs(Y - fake_Y_from_fake_X))
-        cycle_consistency_loss_L1 = forward_loss_L1 + backward_loss_L1
+        forward_loss_classic = classic_loss(fake_X_from_fake_Y, X, a.X_type)
+        backward_loss_classic = classic_loss(fake_Y_from_fake_X, Y, a.Y_type)
+        cycle_consistency_loss_classic = forward_loss_classic + backward_loss_classic
 
     # define loss for G and F
     with tf.name_scope("loss_G"):
         # predict_fake => 1
         # abs() => 0
-        gen_G_loss_GAN = loss_generator(discrim_Y_loss, predict_fake_Y, predict_real_Y)
-        gen_G_loss = gen_G_loss_GAN * a.gan_weight + cycle_consistency_loss_L1 * a.l1_weight
+        gen_G_loss_GAN = GAN_loss(discrim_Y_loss, predict_fake_Y, predict_real_Y)
+        gen_G_loss = gen_G_loss_GAN * a.gan_weight + cycle_consistency_loss_classic * a.classic_weight
 
     with tf.name_scope("loss_F"):
         # predict_fake => 1
         # abs() => 0
         # gen_F_loss_GAN = tf.reduce_mean(-tf.log(predict_fake_X + EPS))
         # gen_F_loss_GAN = -discrim_X_loss
-        gen_F_loss_GAN = loss_generator(discrim_X_loss, predict_fake_X, predict_real_X)
-        gen_F_loss = gen_F_loss_GAN * a.gan_weight + cycle_consistency_loss_L1 * a.l1_weight
+        gen_F_loss_GAN = GAN_loss(discrim_X_loss, predict_fake_X, predict_real_X)
+        gen_F_loss = gen_F_loss_GAN * a.gan_weight + cycle_consistency_loss_classic * a.classic_weight
 
     # train discriminators
     def train_discriminator(prefix, discrim_loss):
@@ -672,8 +769,8 @@ def create_CycleGAN_model(X, Y):
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
     update_losses = ema.apply([discrim_X_loss, discrim_Y_loss,
                                gen_G_loss_GAN, gen_F_loss_GAN,
-                               forward_loss_L1, backward_loss_L1,
-                               cycle_consistency_loss_L1])
+                               forward_loss_classic, backward_loss_classic,
+                               cycle_consistency_loss_classic])
 
     global_step = tf.contrib.framework.get_or_create_global_step()
     incr_global_step = tf.assign(global_step, global_step+1)
@@ -689,14 +786,14 @@ def create_CycleGAN_model(X, Y):
         discrim_Y_grads_and_vars=discrim_Y_grads_and_vars,
         gen_G_loss_GAN=ema.average(gen_G_loss_GAN),
         gen_F_loss_GAN=ema.average(gen_F_loss_GAN),
-        forward_cycle_loss_L1=ema.average(forward_loss_L1),
-        backward_cycle_loss_L1=ema.average(backward_loss_L1),
+        forward_cycle_loss_classic=ema.average(forward_loss_classic),
+        backward_cycle_loss_classic=ema.average(backward_loss_classic),
         gen_G_grads_and_vars=gen_G_grads_and_vars,
         gen_F_grads_and_vars=gen_F_grads_and_vars,
         outputs=fake_Y,
         reverse_outputs=fake_X,
         train=tf.group(update_losses, incr_global_step, gen_G_train, gen_F_train),
-        cycle_consistency_loss_L1=ema.average(cycle_consistency_loss_L1),
+        cycle_consistency_loss_classic=ema.average(cycle_consistency_loss_classic),
     )
 
 

@@ -81,6 +81,8 @@ If you wish to write in-progress pictures as the network is training, use ```--d
 Major issues
 - add instance normalization ([Ulyanov D et al., 2016](https://arxiv.org/abs/1607.08022))
 - add image buffer that stores the previous image (to update discriminators using a history of 50 generated images)
+- u-net declaration with decoder using encoder dimensions (fix crash when height and width other than powers of 2)
+
 Minor issues
 - flexible learning rate for the Adams solver
 - add one-direction test mode for CycleGAN
@@ -112,6 +114,7 @@ Minor issues
 ## Acknowledgement
 
 This repository is based on [this](https://github.com/affinelayer/pix2pix-tensorflow) Tensorflow implementation of the paired image-to-image translation ([Isola et al., 2016](https://arxiv.org/pdf/1611.07004v1.pdf)) 
+Highway and dense net were adapted from the implementation exemplified in [this blog entry](https://chatbotslife.com/resnets-highwaynets-and-densenets-oh-my-9bb15918ee32). 
 
 ## Citation
 
@@ -121,7 +124,7 @@ If you use this code for your research, please cite the papers this code is base
 @article{pix2pix2016,
   title={Image-to-Image Translation with Conditional Adversarial Networks},
   author={Isola, Phillip and Zhu, Jun-Yan and Zhou, Tinghui and Efros, Alexei A},
-  journal={arxiv},
+  journal={arXiv preprint arXiv:1611.07004v1},
   year={2016}
 }
 
@@ -140,4 +143,25 @@ If you use this code for your research, please cite the papers this code is base
   year={2016},
   organization={Springer}
 }
+
+@article{He2016identity,
+  title={Identity Mappings in Deep Residual Networks},
+  author={Kaiming He and Xiangyu Zhang and Shaoqing Ren and Jian Sun},
+  journal={arXiv preprint arXiv:1603.05027},
+  year={2016}}
+
+@article{Srivastava2015highway,
+  title={Highway Networks},
+  author={Rupesh Kumar Srivastava and Klaus Greff and J{\"{u}}rgen Schmidhuber},
+  journal={arXiv preprint arXiv:1505.00387},
+  year={2015}
+}
+
+@article{Huang2016dense,
+  title={Densely Connected Convolutional Networks},
+  author={Gao Huang and Zhuang Liu and Kilian Q. Weinberger},
+  journal={arXiv preprint arXiv:1608.06993},
+  year={2016}
+}
+
 ```
