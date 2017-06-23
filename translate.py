@@ -3,7 +3,6 @@ from __future__ import division
 from __future__ import print_function
 
 import tensorflow as tf
-import tensorflow.contrib.slim as slim
 import numpy as np
 import argparse
 import os
@@ -27,6 +26,7 @@ parser.add_argument("--output_dir", required=True, help="where to put output fil
 parser.add_argument("--seed", type=int)
 parser.add_argument("--checkpoint", default=None, help="directory with checkpoint to resume training from or use for testing")
 parser.add_argument("--restore", default="model", choices=["all", "generators"])
+parser.add_argument("--untouch", default="nothing", choices=["nothing", "core"], help="excluded from training")
 parser.add_argument("--loss", default="log", choices=["log", "square"])
 parser.add_argument("--gen_loss", default="fake", choices=["fake", "negative", "contra"])
 parser.add_argument("--X_type", default="image",  choices=["image", "label"])
@@ -76,21 +76,18 @@ def preprocess(image):
     with tf.name_scope("preprocess"):
         # [0, 1] => [-1, 1]
         return image * 2 - 1
-        # TODO revert to original and add deprocess [-1, 1] => [0, 1] before cross entropy loss only
-        # return image   # works for labels!
 
 
 def deprocess(image):
     with tf.name_scope("deprocess"):
         # [-1, 1] => [0, 1]
         return tf.image.convert_image_dtype((image + 1) / 2, dtype=tf.uint8, saturate=True)
-        # return tf.image.convert_image_dtype(image , dtype=tf.uint8, saturate=True)   # works for labels!
 
 
-def conv(batch_input, out_channels, size=4, stride=2):
+def conv(batch_input, out_channels, size=4, stride=2, initializer=tf.random_normal_initializer(0, 0.02)):
     with tf.variable_scope("conv"):
         in_channels = batch_input.get_shape()[3]
-        filter = tf.get_variable("filter", [size, size, in_channels, out_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02))
+        filter = tf.get_variable("filter", [size, size, in_channels, out_channels], dtype=tf.float32, initializer=initializer)
         # [batch, in_height, in_width, in_channels], [filter_width, filter_height, in_channels, out_channels]
         #     => [batch, out_height, out_width, out_channels]
         p = int((size - 1) / 2)
@@ -283,196 +280,232 @@ def load_images(input_dir, input_name=''):
 
 
 def create_u_net(generator_inputs, generator_outputs_channels):
-    layers = []
 
-    # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
-    with tf.variable_scope("encoder_1"):
-        output = conv(generator_inputs, a.ngf, stride=2)
-        layers.append(output)
+    max_depth = 8
+    ngf = a.ngf * np.array([1, 2, 4, 8, 8, 8, 8, 8])
 
-    layer_specs = [
-        a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
-        a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
-        a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
-        a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
-        a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
-        a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
-        a.ngf * 8, # encoder_8: [batch, 2, 2, ngf * 8] => [batch, 1, 1, ngf * 8]
-    ]
+    def encoder_decoder(input, depth):
+        if depth==max_depth:
+            return input
 
-    for out_channels in layer_specs:
-        with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
-            rectified = lrelu(layers[-1], 0.2)
-            # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
-            convolved = conv(rectified, out_channels, stride=2)
-            output = batchnorm(convolved)
-            layers.append(output)
+        with tf.variable_scope("encoder_%d" % depth):
+            down = lrelu(input, 0.2)
+            down = conv(down, ngf[depth], stride=2)
+            down = batchnorm(down)
 
-    layer_specs = [
-        (a.ngf * 8, 0.5),   # decoder_8: [batch, 1, 1, ngf * 8] => [batch, 2, 2, ngf * 8 * 2]
-        (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
-        (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
-        (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
-        (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
-        (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
-        (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
-    ]
+        up = encoder_decoder(down, depth + 1)
 
-    num_encoder_layers = len(layers)
-    for decoder_layer, (out_channels, dropout) in enumerate(layer_specs):
-        skip_layer = num_encoder_layers - decoder_layer - 1
-        with tf.variable_scope("decoder_%d" % (skip_layer + 1)):
-            if decoder_layer == 0:
-                # first decoder layer doesn't have skip connections
-                # since it is directly connected to the skip_layer
-                input = layers[-1]
-            else:
-                input = tf.concat([layers[-1], layers[skip_layer]], axis=3)
-
-            rectified = tf.nn.relu(input)
-            # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
-            output = deconv(rectified, out_channels)
+        with tf.variable_scope("decoder_%d" % depth):
+            output = tf.concat([up, down], axis=3)
+            output = tf.nn.relu(output)
+            output = deconv(output, ngf[depth])
             output = batchnorm(output)
+            if depth > 5:
+                output = tf.nn.dropout(output, keep_prob=0.5)
 
-            if dropout > 0.0:
-                output = tf.nn.dropout(output, keep_prob=1 - dropout)
+        return output
 
-            layers.append(output)
+    with tf.variable_scope("encoder_1"):  # [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
+        down = conv(generator_inputs, ngf[1], stride=2)
 
-    # decoder_1: [batch, 128, 128, ngf * 2] => [batch, 256, 256, generator_outputs_channels]
-    with tf.variable_scope("decoder_1"):
-        input = tf.concat([layers[-1], layers[0]], axis=3)
-        rectified = tf.nn.relu(input)
-        output = deconv(rectified, generator_outputs_channels)
+    up = encoder_decoder(down, 2)
+
+    with tf.variable_scope("decoder_1"):  # [batch, 128, 128, ngf * 2] => [batch, 256, 256, generator_outputs_channels]
+        output = tf.concat([up, down], axis=3)
+        output = tf.nn.relu(output)
+        output = deconv(output, generator_outputs_channels)
         output = tf.tanh(output)
-        layers.append(output)
 
-    return layers[-1]
+    return output
+
+#
+# def create_u_net(generator_inputs, generator_outputs_channels):
+#     layers = []
+#
+#     # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
+#     with tf.variable_scope("encoder_1"):
+#         output = conv(generator_inputs, a.ngf, stride=2)
+#         layers.append(output)
+#
+#     layer_specs = [
+#         a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
+#         a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
+#         a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
+#         a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
+#         a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
+#         a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
+#         a.ngf * 8, # encoder_8: [batch, 2, 2, ngf * 8] => [batch, 1, 1, ngf * 8]
+#     ]
+#
+#     for out_channels in layer_specs:
+#         with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
+#             rectified = lrelu(layers[-1], 0.2)
+#             # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
+#             convolved = conv(rectified, out_channels, stride=2)
+#             output = batchnorm(convolved)
+#             layers.append(output)
+#
+#     layer_specs = [
+#         (a.ngf * 8, 0.5),   # decoder_8: [batch, 1, 1, ngf * 8] => [batch, 2, 2, ngf * 8 * 2]
+#         (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
+#         (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
+#         (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
+#         (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
+#         (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
+#         (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
+#     ]
+#
+#     num_encoder_layers = len(layers)
+#     for decoder_layer, (out_channels, dropout) in enumerate(layer_specs):
+#         skip_layer = num_encoder_layers - decoder_layer - 1
+#         with tf.variable_scope("decoder_%d" % (skip_layer + 1)):
+#             if decoder_layer == 0:
+#                 # first decoder layer doesn't have skip connections
+#                 # since it is directly connected to the skip_layer
+#                 input = layers[-1]
+#             else:
+#                 input = tf.concat([layers[-1], layers[skip_layer]], axis=3)
+#
+#             rectified = tf.nn.relu(input)
+#             # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
+#             output = deconv(rectified, out_channels)
+#             output = batchnorm(output)
+#
+#             if dropout > 0.0:
+#                 output = tf.nn.dropout(output, keep_prob=1 - dropout)
+#
+#             layers.append(output)
+#
+#     # decoder_1: [batch, 128, 128, ngf * 2] => [batch, 256, 256, generator_outputs_channels]
+#     with tf.variable_scope("decoder_1"):
+#         input = tf.concat([layers[-1], layers[0]], axis=3)
+#         rectified = tf.nn.relu(input)
+#         output = deconv(rectified, generator_outputs_channels)
+#         output = tf.tanh(output)
+#         layers.append(output)
+#
+#     return layers[-1]
 
 
 def create_res_net(generator_inputs, generator_outputs_channels, n_res_blocks=9, ngf=32):
     layers = []
 
-    # encoder_1 = c7s1 - 32: [batch, 256, 256, in_channels] => [batch, 256, 256, ngf]
-    with tf.variable_scope("encoder_1"):
-        output = conv(generator_inputs, ngf, size=7, stride=1)
-        layers.append(output)
-
-    # encoder_2 = d64: [batch, 256, 256, ngf] => [batch, 128, 128, ngf*2]
-    with tf.variable_scope("encoder_2"):
-        output = conv(layers[-1], ngf*2, size=3, stride=2)
-        layers.append(output)
-
-    # encoder_3 = d128: [batch, 128, 128, ngf*2] => [batch, 64, 64, ngf*4]
-    with tf.variable_scope("encoder_3"):
-        output = conv(layers[-1], ngf*4, size=3, stride=2)
-        layers.append(output)
+    encoder(generator_inputs, layers, ngf)
 
     # 9 residual blocks = r128: [batch, 64, 64, ngf*4] => [batch, 64, 64, ngf*4]
-    for block in range(n_res_blocks):
-        with tf.variable_scope("residual_%d" % (block + 1)):
-            input = layers[-1]
-            output = input
-            for layer in range(2):
-                with tf.variable_scope("layer_%d" % (layer + 1)):
-                    output = conv(output, ngf * 4, size=3, stride=1)
-                    output = batchnorm(output)
-                    output = tf.nn.relu(output)
-            layers.append(input+output)
+    with tf.variable_scope("resnet"):
+        for block in range(n_res_blocks):
+            with tf.variable_scope("residual_block_%d" % (block + 1)):
+                input = layers[-1]
+                output = input
+                for layer in range(2):
+                    with tf.variable_scope("layer_%d" % (layer + 1)):
+                        output = conv(output, ngf * 4, size=3, stride=1)
+                        output = batchnorm(output)
+                        output = tf.nn.relu(output)
+                layers.append(input+output)
 
-    # decoder_3 = u64: [batch, 64, 64, ngf*4] => [batch, 128, 128, ngf*2]
-    with tf.variable_scope("decoder_3"):
-        input = layers[-1]
-        output = deconv(input, ngf*2)
-        output = batchnorm(output)
-        rectified = tf.nn.relu(output)
-        layers.append(rectified)
-
-    # decoder_2 = u32: [batch, 128, 128, ngf*2] => [batch, 256, 256, ngf]
-    with tf.variable_scope("decoder_2"):
-        input = layers[-1]
-        output = deconv(input, ngf)
-        output = batchnorm(output)
-        rectified = tf.nn.relu(output)
-        layers.append(rectified)
-
-    # decoder_1 = c7s1-3: [batch, 256, 256, ngf] => [batch, 256, 256, generator_output_channels]
-    with tf.variable_scope("decoder_1"):
-        input = layers[-1]
-        output = conv(input, generator_outputs_channels, size=7, stride=1)
-        output = tf.tanh(output)
-        layers.append(output)
+    decoder(generator_outputs_channels, layers, ngf)
 
     return layers[-1]
 
 
-def create_highway_net(generator_inputs, generator_outputs_channels, total_layers=25,  skipped_layers = 5, ngf = 64):
-    """
-    From https://chatbotslife.com/resnets-highwaynets-and-densenets-oh-my-9bb15918ee32
-    :param generator_inputs:
-    :param generator_outputs_channels:
-    :param total_layers:
-    :param skipped_layers:
-    :param ngf:
-    :return:
-    """
-    units_between_stride = total_layers // skipped_layers
+def create_highway_net(generator_inputs, generator_outputs_channels, n_highway_units=9, ngf=32):
+    layers = []
 
-    def highwayUnit(input_layer, i):
-        with tf.variable_scope("highway_unit" + str(i)):
-            H = slim.conv2d(input_layer, ngf, [3, 3])
-            T = slim.conv2d(input_layer, ngf, [3, 3],
-                            # We initialize with a negative bias to push the network to use the skip connection
-                            biases_initializer=tf.constant_initializer(-1.0), activation_fn=tf.nn.sigmoid)
-            output = H * T + input_layer * (1.0 - T)
-            return output
+    encoder(generator_inputs, layers, ngf)
 
-    # tf.reset_default_graph()
+    # 9 residual blocks = r128: [batch, 64, 64, ngf*4] => [batch, 64, 64, ngf*4]
+    with tf.variable_scope("highwaynet"):
+        for block in range(n_highway_units):
+            with tf.variable_scope("highway_unit_%d" % (block + 1)):
+                input = layers[-1]
+                with tf.variable_scope("transform"):
+                    output = input
+                    for layer in range(2):
+                        with tf.variable_scope("layer_%d" % (layer + 1)):
+                            output = conv(output, ngf * 4, size=3, stride=1)
+                            output = batchnorm(output)
+                            output = tf.nn.relu(output)
+                with tf.variable_scope("gate"):
+                    gate = conv(input, ngf * 4, size=3, stride=1, initializer=tf.constant_initializer(-1.0))
+                    output = batchnorm(output)
+                    gate = tf.nn.sigmoid(gate)
 
-    layer1 = slim.conv2d(generator_inputs, ngf, [3, 3], normalizer_fn=slim.batch_norm, scope='conv_' + str(0))
-    for i in range(5):
-        for j in range(units_between_stride):
-            layer1 = highwayUnit(layer1, j + (i * units_between_stride))
-        layer1 = slim.conv2d(layer1, ngf, [3, 3], stride=[2, 2], normalizer_fn=slim.batch_norm, scope='conv_s_' + str(i))
+                layers.append(input*(1.0-gate) + output*gate)
 
-    top = slim.conv2d(layer1, generator_outputs_channels, [3, 3], normalizer_fn=slim.batch_norm, activation_fn=None, scope='conv_top')
+    decoder(generator_outputs_channels, layers, ngf)
 
-    return top
+    return layers[-1]
 
 
-def create_dense_net(generator_inputs, generator_outputs_channels, total_layers=25,  skipped_layers = 5, ngf=64):
-    """
-    From https://chatbotslife.com/resnets-highwaynets-and-densenets-oh-my-9bb15918ee32
-    :param generator_inputs:
-    :param generator_outputs_channels:
-    :param total_layers:
-    :param skipped_layers:
-    :param ngf:
-    :return:
-    """
-    units_between_stride = total_layers / skipped_layers
+def create_dense_net(generator_inputs, generator_outputs_channels, n_dense_blocks=5, n_dense_layers=5, ngf=32):
+    layers = []
 
-    def denseBlock(input_layer, i, j):
-        with tf.variable_scope("dense_unit" + str(i)):
-            nodes = []
-            a = slim.conv2d(input_layer, ngf, [3, 3], normalizer_fn=slim.batch_norm)
-            nodes.append(a)
-            for z in range(j):
-                b = slim.conv2d(tf.concat(3, nodes), ngf, [3, 3], normalizer_fn=slim.batch_norm)
-                nodes.append(b)
-            return b
+    encoder(generator_inputs, layers, ngf)
 
-    # tf.reset_default_graph()
+    # n_layers = n_dense_blocks * n_dense_layers
+    with tf.variable_scope("densenet"):
+        for block in range(n_dense_blocks):
+            with tf.variable_scope("dense_block_%d" % (block + 1)):
+                nodes = []
+                nodes.append(layers[-1])
+                for layer in range(n_dense_layers):
+                    with tf.variable_scope("dense_layer_%d" % (layer + 1)):
+                        input = tf.concat(nodes, 3)
+                        output = conv(input, ngf * 4, size=3, stride=1)
+                        output = batchnorm(output)
+                        output = tf.nn.relu(output)
+                        nodes.append(output)
+                layers.append(nodes[-1])
 
-    layer1 = slim.conv2d(generator_inputs, ngf, [3, 3], normalizer_fn=slim.batch_norm, scope='conv_' + str(0))
-    for i in range(5):
-        layer1 = denseBlock(layer1, i, units_between_stride)
-        layer1 = slim.conv2d(layer1, ngf, [3, 3], stride=[2, 2], normalizer_fn=slim.batch_norm, scope='conv_s_' + str(i))
+    decoder(generator_outputs_channels, layers, ngf)
 
-    top = slim.conv2d(layer1, generator_outputs_channels, [3, 3], normalizer_fn=slim.batch_norm, activation_fn=None, scope='conv_top')
+    return layers[-1]
 
-    return top
 
+def encoder(generator_inputs, layers, ngf):
+    with tf.variable_scope("encoder"):
+        # encoder_1 = c7s1 - 32: [batch, 256, 256, in_channels] => [batch, 256, 256, ngf]
+        with tf.variable_scope("conv_1"):
+            output = conv(generator_inputs, ngf, size=7, stride=1)
+            layers.append(output)
+
+        # encoder_2 = d64: [batch, 256, 256, ngf] => [batch, 128, 128, ngf*2]
+        with tf.variable_scope("conv_2"):
+            output = conv(layers[-1], ngf * 2, size=3, stride=2)
+            layers.append(output)
+
+        # encoder_3 = d128: [batch, 128, 128, ngf*2] => [batch, 64, 64, ngf*4]
+        with tf.variable_scope("conv_3"):
+            output = conv(layers[-1], ngf * 4, size=3, stride=2)
+            layers.append(output)
+
+
+def decoder(generator_outputs_channels, layers, ngf):
+    with tf.variable_scope("encoder"):
+        # decoder_3 = u64: [batch, 64, 64, ngf*4] => [batch, 128, 128, ngf*2]
+        with tf.variable_scope("deconv_1"):
+            input = layers[-1]
+            output = deconv(input, ngf * 2)
+            output = batchnorm(output)
+            rectified = tf.nn.relu(output)
+            layers.append(rectified)
+
+        # decoder_2 = u32: [batch, 128, 128, ngf*2] => [batch, 256, 256, ngf]
+        with tf.variable_scope("deconv_2"):
+            input = layers[-1]
+            output = deconv(input, ngf)
+            output = batchnorm(output)
+            rectified = tf.nn.relu(output)
+            layers.append(rectified)
+
+        # decoder_1 = c7s1-3: [batch, 256, 256, ngf] => [batch, 256, 256, generator_output_channels]
+        with tf.variable_scope("deconv_3"):
+            input = layers[-1]
+            output = conv(input, generator_outputs_channels, size=7, stride=1)
+            output = tf.tanh(output)
+            layers.append(output)
 
 
 if a.generator == 'unet':
@@ -751,7 +784,12 @@ def create_CycleGAN_model(X, Y):
 
     # train generators
     def train_generator(prefix, gen_loss):
-        gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith(prefix)]
+        if a.untouch == "nothing":
+            gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith(prefix)]
+        elif a.untouch == "core":
+            gen_tvars = [var for var in tf.trainable_variables()
+                         if var.name.startswith(prefix) and not var.name.startswith(prefix+"/"+a.generator)]
+            print("Exclude %s %s/%s from training" % (a.untouch, prefix, a.generator))
         gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
         gen_grads_and_vars = gen_optim.compute_gradients(gen_loss, var_list=gen_tvars)
         gen_train = gen_optim.apply_gradients(gen_grads_and_vars)
