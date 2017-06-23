@@ -318,74 +318,6 @@ def create_u_net(generator_inputs, generator_outputs_channels):
 
     return output
 
-#
-# def create_u_net(generator_inputs, generator_outputs_channels):
-#     layers = []
-#
-#     # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
-#     with tf.variable_scope("encoder_1"):
-#         output = conv(generator_inputs, a.ngf, stride=2)
-#         layers.append(output)
-#
-#     layer_specs = [
-#         a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
-#         a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
-#         a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
-#         a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
-#         a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
-#         a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
-#         a.ngf * 8, # encoder_8: [batch, 2, 2, ngf * 8] => [batch, 1, 1, ngf * 8]
-#     ]
-#
-#     for out_channels in layer_specs:
-#         with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
-#             rectified = lrelu(layers[-1], 0.2)
-#             # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
-#             convolved = conv(rectified, out_channels, stride=2)
-#             output = batchnorm(convolved)
-#             layers.append(output)
-#
-#     layer_specs = [
-#         (a.ngf * 8, 0.5),   # decoder_8: [batch, 1, 1, ngf * 8] => [batch, 2, 2, ngf * 8 * 2]
-#         (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
-#         (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
-#         (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
-#         (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
-#         (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
-#         (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
-#     ]
-#
-#     num_encoder_layers = len(layers)
-#     for decoder_layer, (out_channels, dropout) in enumerate(layer_specs):
-#         skip_layer = num_encoder_layers - decoder_layer - 1
-#         with tf.variable_scope("decoder_%d" % (skip_layer + 1)):
-#             if decoder_layer == 0:
-#                 # first decoder layer doesn't have skip connections
-#                 # since it is directly connected to the skip_layer
-#                 input = layers[-1]
-#             else:
-#                 input = tf.concat([layers[-1], layers[skip_layer]], axis=3)
-#
-#             rectified = tf.nn.relu(input)
-#             # [batch, in_height, in_width, in_channels] => [batch, in_height*2, in_width*2, out_channels]
-#             output = deconv(rectified, out_channels)
-#             output = batchnorm(output)
-#
-#             if dropout > 0.0:
-#                 output = tf.nn.dropout(output, keep_prob=1 - dropout)
-#
-#             layers.append(output)
-#
-#     # decoder_1: [batch, 128, 128, ngf * 2] => [batch, 256, 256, generator_outputs_channels]
-#     with tf.variable_scope("decoder_1"):
-#         input = tf.concat([layers[-1], layers[0]], axis=3)
-#         rectified = tf.nn.relu(input)
-#         output = deconv(rectified, generator_outputs_channels)
-#         output = tf.tanh(output)
-#         layers.append(output)
-#
-#     return layers[-1]
-
 
 def create_res_net(generator_inputs, generator_outputs_channels, n_res_blocks=9, ngf=32):
     layers = []
@@ -415,7 +347,7 @@ def create_highway_net(generator_inputs, generator_outputs_channels, n_highway_u
 
     encoder(generator_inputs, layers, ngf)
 
-    # 9 residual blocks = r128: [batch, 64, 64, ngf*4] => [batch, 64, 64, ngf*4]
+    # n_layers = 2 * n_highway_units
     with tf.variable_scope("highwaynet"):
         for block in range(n_highway_units):
             with tf.variable_scope("highway_unit_%d" % (block + 1)):
@@ -608,7 +540,7 @@ def classic_loss(outputs, targets, target_type):
 
 def create_pix2pix_model(inputs, targets,
                          generator_name="generator", discriminator_name="discriminator", target_type=a.X_type):
-    with tf.variable_scope(generator_name) as scope:
+    with tf.variable_scope(generator_name):
         out_channels = int(targets.get_shape()[-1])
         outputs = create_generator(inputs, out_channels)
 
@@ -699,22 +631,22 @@ def create_CycleGAN_model(X, Y):
     # create two generators G and F, one for forward and one for backward translation, each having two copies,
     # one for real images and one for fake images which share the same underlying variables
     with tf.name_scope("G_on_real"):
-        with tf.variable_scope("G") as scope:
+        with tf.variable_scope("G"):
             Y_channels = int(Y.get_shape()[-1])
             fake_Y = create_generator(X, Y_channels)
 
     with tf.name_scope("F_on_real"):
-        with tf.variable_scope("F") as scope:
+        with tf.variable_scope("F"):
             X_channels = int(X.get_shape()[-1])
             fake_X = create_generator(Y, X_channels)
 
     with tf.name_scope("G_on_fake"):
-        with tf.variable_scope("G", reuse=True) as scope:
+        with tf.variable_scope("G", reuse=True):
             Y_channels = int(Y.get_shape()[-1])
             fake_Y_from_fake_X = create_generator(fake_X, Y_channels)
 
     with tf.name_scope("F_on_fake"):
-        with tf.variable_scope("F", reuse=True) as scope:
+        with tf.variable_scope("F", reuse=True):
             X_channels = int(X.get_shape()[-1])
             fake_X_from_fake_Y = create_generator(fake_Y, X_channels)
 
@@ -912,7 +844,7 @@ def main():
     if not os.path.exists(a.output_dir):
         os.makedirs(a.output_dir)
 
-    if a.mode == "test" or a.mode == "export":
+    if a.mode == "test":
         if a.checkpoint is None:
             raise Exception("checkpoint required for test mode")
 
@@ -930,62 +862,11 @@ def main():
     with open(os.path.join(a.output_dir, "options.json"), "w") as f:
         f.write(json.dumps(vars(a), sort_keys=True, indent=4))
 
-    if a.mode == "export":
-        # export the generator to a meta graph that can be imported later for standalone generation
-        if a.lab_colorization:
-            raise Exception("export not supported for lab_colorization")
-
-        input = tf.placeholder(tf.string, shape=[1])
-        input_data = tf.decode_base64(input[0])
-        input_image = tf.image.decode_png(input_data)
-
-        # remove alpha channel if present
-        input_image = tf.cond(tf.equal(tf.shape(input_image)[2], 4), lambda: input_image[:,:,:3], lambda: input_image)
-        # convert grayscale to RGB
-        input_image = tf.cond(tf.equal(tf.shape(input_image)[2], 1), lambda: tf.image.grayscale_to_rgb(input_image), lambda: input_image)
-
-        input_image = tf.image.convert_image_dtype(input_image, dtype=tf.float32)
-        input_image.set_shape([CROP_SIZE, CROP_SIZE, 3])
-        batch_input = tf.expand_dims(input_image, axis=0)
-
-        with tf.variable_scope("generator"):
-            batch_output = deprocess(create_generator(preprocess(batch_input), 3))
-
-        output_image = tf.image.convert_image_dtype(batch_output, dtype=tf.uint8)[0]
-        if a.output_filetype == "png":
-            output_data = tf.image.encode_png(output_image)
-        elif a.output_filetype == "jpeg":
-            output_data = tf.image.encode_jpeg(output_image, quality=80)
-        else:
-            raise Exception("invalid filetype")
-        output = tf.convert_to_tensor([tf.encode_base64(output_data)])
-
-        key = tf.placeholder(tf.string, shape=[1])
-        inputs = {
-            "key": key.name,
-            "input": input.name
-        }
-        tf.add_to_collection("inputs", json.dumps(inputs))
-        outputs = {
-            "key":  tf.identity(key).name,
-            "output": output.name,
-        }
-        tf.add_to_collection("outputs", json.dumps(outputs))
-
-        init_op = tf.global_variables_initializer()
-        restore_saver = tf.train.Saver()
-        export_saver = tf.train.Saver()
-
-        with tf.Session() as sess:
-            sess.run(init_op)
-            print("loading model from checkpoint")
-            checkpoint = tf.train.latest_checkpoint(a.checkpoint)
-            restore_saver.restore(sess, checkpoint)
-            print("exporting model")
-            export_saver.export_meta_graph(filename=os.path.join(a.output_dir, "export.meta"))
-            export_saver.save(sess, os.path.join(a.output_dir, "export"), write_meta_graph=False)
-
-        return
+    # TODO Load arguments from JSON file
+    # with open(os.path.join(a.output_dir, "options.json"), "r") as ff:
+    #     b = (json.loads(ff.read()))
+    #     for k, v in b.items():
+    #         print(k, "=", v)
 
     examples = load_examples()
 
