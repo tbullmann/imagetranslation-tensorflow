@@ -21,11 +21,17 @@ parser.add_argument("--image_height", help="image height")
 parser.add_argument("--image_width", help="image width")
 parser.add_argument("--model", required=True, choices=["pix2pix", "pix2pix2", "CycleGAN"])
 parser.add_argument("--generator", default="unet", choices=["unet", "resnet", "highwaynet", "densenet"])
+parser.add_argument("--n_res_blocks", default= 9, help="number of residual blocks in res net")
+parser.add_argument("--n_highway_units", default=9, help="number of highway units in highway net")
+parser.add_argument("--n_dense_blocks", default=5, help="number of dense blocks in dense net")
+parser.add_argument("--n_dense_layers", default=5, help="number of dense connected layers in each block of the dense net")
+parser.add_argument("--discriminator", default="", help="(CycleGAN only) discriminator on target vs output or paired with input", choices=["paired", "unpaired", ""])
+
 parser.add_argument("--mode", required=True, choices=["train", "test", "export"])
 parser.add_argument("--output_dir", required=True, help="where to put output files")
 parser.add_argument("--seed", type=int)
 parser.add_argument("--checkpoint", default=None, help="directory with checkpoint to resume training from or use for testing")
-parser.add_argument("--restore", default="model", choices=["all", "generators"])
+parser.add_argument("--restore", default="all", choices=["all", "both", "generators"])
 parser.add_argument("--untouch", default="nothing", choices=["nothing", "core"], help="excluded from training")
 parser.add_argument("--loss", default="log", choices=["log", "square"])
 parser.add_argument("--gen_loss", default="fake", choices=["fake", "negative", "contra"])
@@ -42,7 +48,7 @@ parser.add_argument("--save_freq", type=int, default=5000, help="save model ever
 
 parser.add_argument("--batch_size", type=int, default=1, help="number of images in batch")
 parser.add_argument("--which_direction", type=str, default="AtoB", choices=["AtoB", "BtoA"])
-parser.add_argument("--ngf", type=int, default=64, help="number of generator filters in first conv layer")
+parser.add_argument("--ngf", type=int, default=0, help="number of generator filters in first conv layer (default 64 for unet, 32 else)")
 parser.add_argument("--ndf", type=int, default=64, help="number of discriminator filters in first conv layer")
 parser.add_argument("--scale_size", type=int, default=286, help="scale images to this size before cropping to 256x256")
 parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
@@ -53,8 +59,8 @@ parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of a
 parser.add_argument("--classic_weight", type=float, default=100.0, help="weight on L1 term for generator gradient")
 parser.add_argument("--gan_weight", type=float, default=1.0, help="weight on GAN term for generator gradient")
 
-# export options
 parser.add_argument("--output_filetype", default="png", choices=["png", "jpeg"])
+
 a = parser.parse_args()
 
 EPS = 1e-12
@@ -64,7 +70,10 @@ if a.image_height is None:
     a.image_height = CROP_SIZE
 if a.image_width is None:
     a.image_width = CROP_SIZE
-
+if a.ngf == 0:
+    a.ngf = 64 if a.generator == "unet" else 32
+if a.discriminator == "":
+    a.discriminator = "unpaired" if a.model == "CycleGAN" else "paired"
 
 Examples = collections.namedtuple("Examples", "input_paths, target_paths, inputs, targets, steps_per_epoch")
 Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, discrim_grads_and_vars, gen_loss_GAN, gen_loss_classic, gen_grads_and_vars, train")
@@ -319,107 +328,107 @@ def create_u_net(generator_inputs, generator_outputs_channels):
     return output
 
 
-def create_res_net(generator_inputs, generator_outputs_channels, n_res_blocks=9, ngf=32):
+def create_res_net(generator_inputs, generator_outputs_channels):
     layers = []
 
-    encoder(generator_inputs, layers, ngf)
+    encoder(generator_inputs, layers)
 
     # 9 residual blocks = r128: [batch, 64, 64, ngf*4] => [batch, 64, 64, ngf*4]
     with tf.variable_scope("resnet"):
-        for block in range(n_res_blocks):
+        for block in range(a.n_res_blocks):
             with tf.variable_scope("residual_block_%d" % (block + 1)):
                 input = layers[-1]
                 output = input
                 for layer in range(2):
                     with tf.variable_scope("layer_%d" % (layer + 1)):
-                        output = conv(output, ngf * 4, size=3, stride=1)
+                        output = conv(output, a.ngf * 4, size=3, stride=1)
                         output = batchnorm(output)
                         output = tf.nn.relu(output)
                 layers.append(input+output)
 
-    decoder(generator_outputs_channels, layers, ngf)
+    decoder(generator_outputs_channels, layers)
 
     return layers[-1]
 
 
-def create_highway_net(generator_inputs, generator_outputs_channels, n_highway_units=9, ngf=32):
+def create_highway_net(generator_inputs, generator_outputs_channels):
     layers = []
 
-    encoder(generator_inputs, layers, ngf)
+    encoder(generator_inputs, layers)
 
     # n_layers = 2 * n_highway_units
     with tf.variable_scope("highwaynet"):
-        for block in range(n_highway_units):
+        for block in range(a.n_highway_units):
             with tf.variable_scope("highway_unit_%d" % (block + 1)):
                 input = layers[-1]
                 with tf.variable_scope("transform"):
                     output = input
                     for layer in range(2):
                         with tf.variable_scope("layer_%d" % (layer + 1)):
-                            output = conv(output, ngf * 4, size=3, stride=1)
+                            output = conv(output, a.ngf * 4, size=3, stride=1)
                             output = batchnorm(output)
                             output = tf.nn.relu(output)
                 with tf.variable_scope("gate"):
-                    gate = conv(input, ngf * 4, size=3, stride=1, initializer=tf.constant_initializer(-1.0))
+                    gate = conv(input, a.ngf * 4, size=3, stride=1, initializer=tf.constant_initializer(-1.0))
                     output = batchnorm(output)
                     gate = tf.nn.sigmoid(gate)
 
                 layers.append(input*(1.0-gate) + output*gate)
 
-    decoder(generator_outputs_channels, layers, ngf)
+    decoder(generator_outputs_channels, layers)
 
     return layers[-1]
 
 
-def create_dense_net(generator_inputs, generator_outputs_channels, n_dense_blocks=5, n_dense_layers=5, ngf=32):
+def create_dense_net(generator_inputs, generator_outputs_channels):
     layers = []
 
-    encoder(generator_inputs, layers, ngf)
+    encoder(generator_inputs, layers)
 
     # n_layers = n_dense_blocks * n_dense_layers
     with tf.variable_scope("densenet"):
-        for block in range(n_dense_blocks):
+        for block in range(a.n_dense_blocks):
             with tf.variable_scope("dense_block_%d" % (block + 1)):
                 nodes = []
                 nodes.append(layers[-1])
-                for layer in range(n_dense_layers):
+                for layer in range(a.n_dense_layers):
                     with tf.variable_scope("dense_layer_%d" % (layer + 1)):
                         input = tf.concat(nodes, 3)
-                        output = conv(input, ngf * 4, size=3, stride=1)
+                        output = conv(input, a.ngf * 4, size=3, stride=1)
                         output = batchnorm(output)
                         output = tf.nn.relu(output)
                         nodes.append(output)
                 layers.append(nodes[-1])
 
-    decoder(generator_outputs_channels, layers, ngf)
+    decoder(generator_outputs_channels, layers)
 
     return layers[-1]
 
 
-def encoder(generator_inputs, layers, ngf):
+def encoder(generator_inputs, layers):
     with tf.variable_scope("encoder"):
         # encoder_1 = c7s1 - 32: [batch, 256, 256, in_channels] => [batch, 256, 256, ngf]
         with tf.variable_scope("conv_1"):
-            output = conv(generator_inputs, ngf, size=7, stride=1)
+            output = conv(generator_inputs, a.ngf, size=7, stride=1)
             layers.append(output)
 
         # encoder_2 = d64: [batch, 256, 256, ngf] => [batch, 128, 128, ngf*2]
         with tf.variable_scope("conv_2"):
-            output = conv(layers[-1], ngf * 2, size=3, stride=2)
+            output = conv(layers[-1], a.ngf * 2, size=3, stride=2)
             layers.append(output)
 
         # encoder_3 = d128: [batch, 128, 128, ngf*2] => [batch, 64, 64, ngf*4]
         with tf.variable_scope("conv_3"):
-            output = conv(layers[-1], ngf * 4, size=3, stride=2)
+            output = conv(layers[-1], a.ngf * 4, size=3, stride=2)
             layers.append(output)
 
 
-def decoder(generator_outputs_channels, layers, ngf):
+def decoder(generator_outputs_channels, layers):
     with tf.variable_scope("encoder"):
         # decoder_3 = u64: [batch, 64, 64, ngf*4] => [batch, 128, 128, ngf*2]
         with tf.variable_scope("deconv_1"):
             input = layers[-1]
-            output = deconv(input, ngf * 2)
+            output = deconv(input, a.ngf * 2)
             output = batchnorm(output)
             rectified = tf.nn.relu(output)
             layers.append(rectified)
@@ -427,7 +436,7 @@ def decoder(generator_outputs_channels, layers, ngf):
         # decoder_2 = u32: [batch, 128, 128, ngf*2] => [batch, 256, 256, ngf]
         with tf.variable_scope("deconv_2"):
             input = layers[-1]
-            output = deconv(input, ngf)
+            output = deconv(input, a.ngf)
             output = batchnorm(output)
             rectified = tf.nn.relu(output)
             layers.append(rectified)
@@ -478,6 +487,12 @@ def create_discriminator(input):
         layers.append(output)
 
     return layers[-1]
+
+
+def create_discriminator_for_image_pairs(discrim_inputs, discrim_targets):
+    # 2x [batch, height, width, in_channels] => [batch, height, width, in_channels * 2]
+    input = tf.concat([discrim_inputs, discrim_targets], axis=3)
+    return create_discriminator(input)
 
 
 def log_loss(real, fake):
@@ -546,11 +561,6 @@ def create_pix2pix_model(inputs, targets,
 
     # create two copies of discriminator, one for real pairs and one for fake pairs
     # they share the same underlying variables
-    def create_discriminator_for_image_pairs(discrim_inputs, discrim_targets):
-        # 2x [batch, height, width, in_channels] => [batch, height, width, in_channels * 2]
-        input = tf.concat([discrim_inputs, discrim_targets], axis=3)
-        return create_discriminator(input)
-
     with tf.name_scope(discriminator_name+"_on_real"):
         with tf.variable_scope(discriminator_name):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
@@ -654,23 +664,23 @@ def create_CycleGAN_model(X, Y):
     # one for real images and one for fake image which share the same underlying variables
     with tf.name_scope("D_X_on_real"):
         with tf.variable_scope("D_X"):
-            # [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_real_X = create_discriminator(X)
+            predict_real_X = create_discriminator(X) if a.discriminator=="unpaired" \
+                else create_discriminator_for_image_pairs(fake_Y, X)
 
     with tf.name_scope("D_X_on_fake"):
         with tf.variable_scope("D_X", reuse=True):
-            # [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_fake_X = create_discriminator(fake_X)
+            predict_fake_X = create_discriminator(fake_X) if a.discriminator=="unpaired" \
+                else create_discriminator_for_image_pairs(fake_Y, fake_X_from_fake_Y)
 
     with tf.name_scope("D_Y_on_real"):
         with tf.variable_scope("D_Y"):
-            # [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_real_Y = create_discriminator(Y)
+            predict_real_Y = create_discriminator(Y) if a.discriminator=="unpaired" \
+                else create_discriminator_for_image_pairs(fake_X, Y)
 
     with tf.name_scope("D_Y_on_fake"):
         with tf.variable_scope("D_Y", reuse=True):
-            # [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_fake_Y = create_discriminator(fake_Y)
+            predict_fake_Y = create_discriminator(fake_Y) if a.discriminator=="unpaired" \
+                else create_discriminator_for_image_pairs(fake_X, fake_Y_from_fake_X)
 
     # define loss for D_X and D_Y
     with tf.name_scope("loss_D_X"):
@@ -927,6 +937,13 @@ def main():
         print("restore only generators")
         restore_variables = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='G') \
                             + tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='F')
+        restore_saver = tf.train.Saver(restore_variables)
+    elif a.restore=="both":
+        print("restore both generators and discriminators")
+        restore_variables = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='G') \
+                            + tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='F') \
+                            + tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='D_Y') \
+                            + tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='D_X')
         restore_saver = tf.train.Saver(restore_variables)
     else:
         restore_saver = saver
