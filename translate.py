@@ -294,7 +294,7 @@ def create_u_net(generator_inputs, generator_outputs_channels):
     ngf = a.ngf * np.array([1, 2, 4, 8, 8, 8, 8, 8])
 
     def encoder_decoder(input, depth):
-        if depth==max_depth:
+        if depth>max_depth:
             return input
 
         with tf.variable_scope("encoder_%d" % depth):
@@ -424,7 +424,7 @@ def encoder(generator_inputs, layers):
 
 
 def decoder(generator_outputs_channels, layers):
-    with tf.variable_scope("encoder"):
+    with tf.variable_scope("decoder"):
         # decoder_3 = u64: [batch, 64, 64, ngf*4] => [batch, 128, 128, ngf*2]
         with tf.variable_scope("deconv_1"):
             input = layers[-1]
