@@ -17,14 +17,14 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir", help="path to folder containing images")
 parser.add_argument("--input_dir_B", help="path to folder containing images")
-parser.add_argument("--image_height", help="image height")
-parser.add_argument("--image_width", help="image width")
+parser.add_argument("--image_height", type=int, help="image height")
+parser.add_argument("--image_width", type=int, help="image width")
 parser.add_argument("--model", required=True, choices=["pix2pix", "pix2pix2", "CycleGAN"])
 parser.add_argument("--generator", default="unet", choices=["unet", "resnet", "highwaynet", "densenet"])
-parser.add_argument("--n_res_blocks", default= 9, help="number of residual blocks in res net")
-parser.add_argument("--n_highway_units", default=9, help="number of highway units in highway net")
-parser.add_argument("--n_dense_blocks", default=5, help="number of dense blocks in dense net")
-parser.add_argument("--n_dense_layers", default=5, help="number of dense connected layers in each block of the dense net")
+parser.add_argument("--n_res_blocks", type=int, default= 9, help="number of residual blocks in res net")
+parser.add_argument("--n_highway_units", type=int, default=9, help="number of highway units in highway net")
+parser.add_argument("--n_dense_blocks", type=int, default=5, help="number of dense blocks in dense net")
+parser.add_argument("--n_dense_layers", type=int, default=5, help="number of dense connected layers in each block of the dense net")
 parser.add_argument("--discriminator", default="", help="(CycleGAN only) discriminator on target vs output or paired with input", choices=["paired", "unpaired", ""])
 
 parser.add_argument("--mode", required=True, choices=["train", "test", "export"])
@@ -51,9 +51,16 @@ parser.add_argument("--which_direction", type=str, default="AtoB", choices=["Ato
 parser.add_argument("--ngf", type=int, default=0, help="number of generator filters in first conv layer (default 64 for unet, 32 else)")
 parser.add_argument("--ndf", type=int, default=64, help="number of discriminator filters in first conv layer")
 parser.add_argument("--scale_size", type=int, default=286, help="scale images to this size before cropping to 256x256")
-parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
-parser.add_argument("--no_flip", dest="flip", action="store_false", help="don't flip images horizontally")
-parser.set_defaults(flip=True)
+parser.add_argument("--fliplr", dest="fliplr", action="store_true", help="flip images horizontally")
+parser.add_argument("--no_fliplr", dest="fliplr", action="store_false", help="don't flip images horizontally")
+parser.set_defaults(fliplr=True)
+parser.add_argument("--flipud", dest="flipud", action="store_true", help="flip images vertically")
+parser.add_argument("--no_flipud", dest="flipud", action="store_false", help="don't flip images vertically")
+parser.set_defaults(flipud=False)
+parser.add_argument("--transpose", dest="transpose", action="store_true", help="transpose images")
+parser.add_argument("--no_transpose", dest="transpose", action="store_false", help="don't transpose images")
+parser.set_defaults(transpose=False)
+
 parser.add_argument("--lr", type=float, default=0.0002, help="initial learning rate for adam")
 parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of adam")
 parser.add_argument("--classic_weight", type=float, default=100.0, help="weight on L1 term for generator gradient")
@@ -122,13 +129,12 @@ def noise(input, std):
     return input + gaussian_noise
 
 
-def batchnorm(input):
+def batchnorm(input, offset_initializer=tf.zeros_initializer()):
     with tf.variable_scope("batchnorm"):
         # this block looks like it has 3 inputs on the graph unless we do this
         input = tf.identity(input)
-
         channels = input.get_shape()[3]
-        offset = tf.get_variable("offset", [channels], dtype=tf.float32, initializer=tf.zeros_initializer())
+        offset = tf.get_variable("offset", [channels], dtype=tf.float32, initializer=offset_initializer)
         scale = tf.get_variable("scale", [channels], dtype=tf.float32, initializer=tf.random_normal_initializer(1.0, 0.02))
         mean, variance = tf.nn.moments(input, axes=[0, 1, 2], keep_dims=False)
         variance_epsilon = 1e-5
@@ -167,11 +173,29 @@ seed_for_random_cropping_X = random.randint(0, 2 ** 31 - 1)
 seed_for_random_cropping_Y = random.randint(0, 2 ** 31 - 1) if a.model == "CycleGAN" else seed_for_random_cropping_X
 
 
+def random_transpose(image, seed=None):
+  """Randomly transposes an image (rotation by 90 degrees counter clock wise and flip up down).
+  With a 1 in 2 chance, outputs the contents of `image` first and second dimensions are transposed,
+  which is `height` and `width`.  Otherwise output the image as-is.
+  """
+  image = tf.convert_to_tensor(image, name='image')
+  uniform_random = tf.random_uniform([], 0, 1.0, seed=seed)
+  mirror_cond = tf.less(uniform_random, .5)
+  result = tf.cond(mirror_cond,
+                   lambda: tf.transpose(image, perm=[1, 0, 2]),
+                   lambda: image)
+  return result
+
+
 def transform(image, seed):
     r = image
     if a.mode == 'train':  # augment image by flipping and cropping
-        if a.flip:
+        if a.fliplr:
             r = tf.image.random_flip_left_right(r, seed=seed)
+        if a.flipud:
+            r = tf.image.random_flip_up_down(r, seed=seed)
+        if a.transpose:
+            r = random_transpose(r, seed=seed)
 
         width = tf.shape(image)[1]  # [height, width, channels]
         height = tf.shape(image)[0]  # [height, width, channels]
@@ -299,7 +323,7 @@ def create_u_net(generator_inputs, generator_outputs_channels):
 
         with tf.variable_scope("encoder_%d" % depth):
             down = lrelu(input, 0.2)
-            down = conv(down, ngf[depth], stride=2)
+            down = conv(down, ngf[depth-1], stride=2)
             down = batchnorm(down)
 
         up = encoder_decoder(down, depth + 1)
@@ -307,7 +331,7 @@ def create_u_net(generator_inputs, generator_outputs_channels):
         with tf.variable_scope("decoder_%d" % depth):
             output = tf.concat([up, down], axis=3)
             output = tf.nn.relu(output)
-            output = deconv(output, ngf[depth])
+            output = deconv(output, ngf[depth-1])
             output = batchnorm(output)
             if depth > 5:
                 output = tf.nn.dropout(output, keep_prob=0.5)
@@ -369,9 +393,9 @@ def create_highway_net(generator_inputs, generator_outputs_channels):
                             output = batchnorm(output)
                             output = tf.nn.relu(output)
                 with tf.variable_scope("gate"):
-                    gate = conv(input, a.ngf * 4, size=3, stride=1, initializer=tf.constant_initializer(-1.0))
-                    output = batchnorm(output)
-                    gate = tf.nn.sigmoid(gate)
+                    gate = conv(input, a.ngf * 4, size=3, stride=1)
+                    gate = batchnorm(gate, offset_initializer=tf.constant_initializer(-10.0))
+                    gate = (tf.nn.sigmoid(gate)+1.)/2.   # [-inf, +inf] --> [-1, +1]  --> [0, 1]
 
                 layers.append(input*(1.0-gate) + output*gate)
 
@@ -542,12 +566,88 @@ def GAN_loss(discrim_loss, fake, real):
     return result
 
 
+def cross_entropy(targets, outputs):
+    # Note: Numerical instability: getting NaN after approximately 100 epochs
+    with tf.name_scope('cross_entropy'):
+        clipped = tf.clip_by_value(outputs, EPS, 1. - EPS)  # clip to avoid log(0)
+        result = -tf.reduce_mean(targets * tf.log(clipped) + (1. - targets) * tf.log(1. - clipped))
+    return result
+
+
+def approx_cross_entropy(targets, outputs):
+
+    def approx_log(x):
+        # log(x) = (x-1)^1/1 - (x-1)^2/2 + O(x^3)
+        return (x - 1.) - tf.square(x - 1.) / 2.
+
+    return -tf.reduce_mean(targets * approx_log(outputs) + (1. - targets) * approx_log(1. - outputs))
+
+
+def dice_coe(output, target, epsilon=1e-10):
+    """
+    From http://tensorlayer.readthedocs.io/en/latest/_modules/tensorlayer/cost.html
+
+    Soerensen-Dice coefficient for comparing the similarity of two distributions,
+    usually be used for binary image segmentation i.e. labels are binary.
+    The coefficient = [0, 1], 1 if totally match.
+
+    Parameters
+    -----------
+    output : tensor
+        A distribution with shape: [batch_size, ....], (any dimensions).
+    target : tensor
+        A distribution with shape: [batch_size, ....], (any dimensions).
+    epsilon : float
+        An optional name to attach to this layer.
+
+    Examples
+    ---------
+    >>> outputs = tl.act.pixel_wise_softmax(network.outputs)
+    >>> dice_loss = 1 - tl.cost.dice_coe(outputs, y_, epsilon=1e-5)
+
+    References
+    -----------
+    - https://en.wikipedia.org/wiki/Soerensen-Dice_coefficient
+    """
+    # inse = tf.reduce_sum( tf.mul(output, target) )
+    # l = tf.reduce_sum( tf.mul(output, output) )
+    # r = tf.reduce_sum( tf.mul(target, target) )
+    inse = tf.reduce_sum( output * target )
+    l = tf.reduce_sum( output * output )
+    r = tf.reduce_sum( target * target )
+    dice = 2 * (inse) / (l + r)
+    if epsilon == 0:
+        return dice
+    else:
+        return tf.clip_by_value(dice, 0, 1.0-epsilon)
+
+
 def classic_loss(outputs, targets, target_type):
     if target_type == "image":  # Absolute value loss / L1 loss
         gen_loss_classic = tf.reduce_mean(tf.abs(targets - outputs))
     elif target_type == "label":  # Cross entropy loss
-        # [-1,+1] ==> [0, 1] for labels
-        gen_loss_classic = tf.reduce_mean(tf.losses.softmax_cross_entropy(targets/2+0.5, outputs/2+0.5))
+        # # [-1,+1] ==> [0, 1] for labels
+        # Softmax cross entropy if one-hot-labels
+        # gen_loss_classic = tf.reduce_mean(tf.losses.softmax_cross_entropy(targets/2+0.5, outputs/2+0.5))
+
+        # # Without softmax for multi-class, multi-label prediction
+        # gen_loss_classic = cross_entropy(targets/2.+0.5, outputs/2.+0.5)
+
+        # # Square loss for numerical stability ----> Implemented without rescaling: THIS WORKS But why?
+        # gen_loss_classic = tf.reduce_mean(targets * tf.square(outputs - 1.) + (1. - targets) * tf.square(outputs))
+
+        # # Square loss for numerical stability +1/+1 --> 0, +1/-1 --> 8, -1/+1 --> 0, -1/-1 --> 8 TODO: Testing this
+        # gen_loss_classic = tf.reduce_mean((1. + targets) * tf.square(1. - outputs) + (1. - targets) * tf.square(outputs + 1.))
+
+        # # Dice coefficient
+        # gen_loss_classic = 1. - dice_coe(outputs, targets)
+
+        # Squared differences
+        gen_loss_classic = tf.reduce_mean(tf.square(targets - outputs))
+
+        # # Approx cross entropy
+        # gen_loss_classic = approx_cross_entropy(targets / 2. + 0.5, outputs / 2. + 0.5)
+
     else:
         raise ValueError("Unknown target type", target_type)
     return gen_loss_classic
@@ -590,7 +690,15 @@ def create_pix2pix_model(inputs, targets,
             gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith(generator_name)]
             gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
             gen_grads_and_vars = gen_optim.compute_gradients(gen_loss, var_list=gen_tvars)
+
+            # without gradient clipping
             gen_train = gen_optim.apply_gradients(gen_grads_and_vars)
+
+            # # with gradient clipping for each variable
+            # capped_gvs = [(tf.clip_by_value(grad, -1., 1.), var) for grad, var in gen_grads_and_vars]
+            # gen_train = gen_optim.apply_gradients(capped_gvs)
+            #
+            # # TODO: gradient clipping by global norm
 
     ema = tf.train.ExponentialMovingAverage(decay=0.99)
     update_losses = ema.apply([discrim_loss, gen_loss_GAN, gen_loss_classic])
@@ -874,7 +982,7 @@ def main():
 
     # TODO Load arguments from JSON file
     # with open(os.path.join(a.output_dir, "options.json"), "r") as ff:
-    #     b = (json.loads(ff.read()))
+    #     b = (json.loads(ff.read()))   # wrap in SimpleNamespace
     #     for k, v in b.items():
     #         print(k, "=", v)
 
