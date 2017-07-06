@@ -97,7 +97,8 @@ Minor issues
 - two batches delivering unpaired images for CycleGAN
 - import of images from different subdirectories
 - different (classic) loss function
-- implementations for u-net as well as res-net, highway-net, dense-net (with endcoders/decoders as in faststyle res-net)
+- recursive implementations for u-net
+- res-net, highway-net, dense-net implementation with endcoder/decoder as in faststyle res-net
 - tested transfer of generators from paired to unpaired
 
 ## Acknowledgement
