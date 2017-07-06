@@ -37,6 +37,7 @@ parser.add_argument("--loss", default="log", choices=["log", "square"])
 parser.add_argument("--gen_loss", default="fake", choices=["fake", "negative", "contra"])
 parser.add_argument("--X_type", default="image",  choices=["image", "label"])
 parser.add_argument("--Y_type", default="image",  choices=["image", "label"])
+parser.add_argument("--label_loss", default="mse", choices=["softmax", "naive", "crossentropy", "sqr0", "sqr1", "dice", "mse"])
 
 parser.add_argument("--max_steps", type=int, help="number of training steps (0 to disable)")
 parser.add_argument("--max_epochs", type=int, help="number of training epochs")
@@ -623,30 +624,44 @@ def dice_coe(output, target, epsilon=1e-10):
 
 
 def classic_loss(outputs, targets, target_type):
+
     if target_type == "image":  # Absolute value loss / L1 loss
         gen_loss_classic = tf.reduce_mean(tf.abs(targets - outputs))
-    elif target_type == "label":  # Cross entropy loss
-        # # [-1,+1] ==> [0, 1] for labels
-        # Softmax cross entropy if one-hot-labels
-        # gen_loss_classic = tf.reduce_mean(tf.losses.softmax_cross_entropy(targets/2+0.5, outputs/2+0.5))
 
-        # # Without softmax for multi-class, multi-label prediction
-        # gen_loss_classic = cross_entropy(targets/2.+0.5, outputs/2.+0.5)
+    elif target_type == "label":
 
-        # # Square loss for numerical stability ----> Implemented without rescaling: THIS WORKS But why?
-        # gen_loss_classic = tf.reduce_mean(targets * tf.square(outputs - 1.) + (1. - targets) * tf.square(outputs))
+        if a.label_loss == "softmax":
+            # Cross entropy loss
+            # # [-1,+1] ==> [0, 1] for labels
+            # Softmax cross entropy if one-hot-labels
+            gen_loss_classic = tf.reduce_mean(tf.losses.softmax_cross_entropy(targets/2+0.5, outputs/2+0.5))
 
-        # # Square loss for numerical stability +1/+1 --> 0, +1/-1 --> 8, -1/+1 --> 0, -1/-1 --> 8 TODO: Testing this
-        # gen_loss_classic = tf.reduce_mean((1. + targets) * tf.square(1. - outputs) + (1. - targets) * tf.square(outputs + 1.))
+        elif a.label_loss == "naive":
+            # # Without softmax for multi-class, multi-label prediction
+            gen_loss_classic = cross_entropy(targets/2.+0.5, outputs/2.+0.5)
 
-        # # Dice coefficient
-        # gen_loss_classic = 1. - dice_coe(outputs, targets)
+        elif a.label_loss == "crossentropy":
+            # # Approx cross entropy
+            gen_loss_classic = approx_cross_entropy(targets / 2. + 0.5, outputs / 2. + 0.5)
 
-        # Squared differences
-        gen_loss_classic = tf.reduce_mean(tf.square(targets - outputs))
+        elif a.label_loss == "sqr0":
+            # # Square loss for numerical stability ----> Implemented without rescaling: THIS WORKS But why?
+            gen_loss_classic = tf.reduce_mean(targets * tf.square(outputs - 1.) + (1. - targets) * tf.square(outputs))
 
-        # # Approx cross entropy
-        # gen_loss_classic = approx_cross_entropy(targets / 2. + 0.5, outputs / 2. + 0.5)
+        elif a.label_loss == "sqr1":
+            # # Square loss for numerical stability +1/+1 --> 0, +1/-1 --> 8, -1/+1 --> 0, -1/-1 --> 8 TODO: Testing this
+            gen_loss_classic = tf.reduce_mean((1. + targets) * tf.square(1. - outputs) + (1. - targets) * tf.square(outputs + 1.))
+
+        elif a.label_loss == "dice":
+            # # Dice coefficient
+             gen_loss_classic = 1. - dice_coe(outputs, targets)
+
+        elif a.label_loss == "mse":
+            # Mean squared error, L2^2 loss
+            gen_loss_classic = tf.reduce_mean(tf.square(targets - outputs))
+
+        else:
+            raise ValueError("Unknown label loss type", a.label_loss)
 
     else:
         raise ValueError("Unknown target type", target_type)
@@ -927,9 +942,9 @@ def append_index(filesets, step=False):
         if step:
             index.write("<th>step</th>")
         if a.model == 'pix2pix':
-            index.write("<th>name</th><th>input</th><th>output</th><th>target</th></tr>")
+            index.write("<th>name</th><th>input</th><th>output</th><th>target</th></tr>\n")
         else:
-            index.write("<th>name</th><th>input</th><th>reverse_output</th><th>output</th><th>target</th><th>name</th></tr>")
+            index.write("<th>name</th><th>input</th><th>reverse_output</th><th>output</th><th>target</th><th>name</th></tr>\n")
 
     for fileset in filesets:
         index.write("<tr>")
@@ -944,7 +959,7 @@ def append_index(filesets, step=False):
         if not a.model == 'pix2pix':
             index.write("<td>%s</td>" % fileset["name2"])
 
-        index.write("</tr>")
+        index.write("</tr>\n")
     return index_path
 
 
