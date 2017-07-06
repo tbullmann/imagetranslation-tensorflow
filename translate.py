@@ -669,7 +669,7 @@ def classic_loss(outputs, targets, target_type):
 
 
 def create_pix2pix_model(inputs, targets,
-                         generator_name="generator", discriminator_name="discriminator", target_type=a.X_type):
+                         generator_name="generator", discriminator_name="discriminator", target_type=a.Y_type):
     with tf.variable_scope(generator_name):
         out_channels = int(targets.get_shape()[-1])
         outputs = create_generator(inputs, out_channels)
