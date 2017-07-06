@@ -79,29 +79,15 @@ If you wish to write in-progress pictures as the network is training, use ```--d
 
 ### Finish CycleGAN implementation according to publication Hu et al., 2017
 Major issues
-- add instance normalization ([Ulyanov D et al., 2016](https://arxiv.org/abs/1607.08022))
-- add image buffer that stores the previous image (to update discriminators using a history of 50 generated images)
-- u-net declaration with decoder using encoder dimensions (fix crash when height and width other than powers of 2)
+- test u-net declaration with decoder using encoder dimensions (fix crash when height and width other than powers of 2)
+- test other datasets, show results on README.md
 
 Minor issues
+- add image buffer that stores the previous image (to update discriminators using a history of 50 generated images)
+- add instance normalization ([Ulyanov D et al., 2016](https://arxiv.org/abs/1607.08022))
 - flexible learning rate for the Adams solver
 - add one-direction test mode for CycleGAN
 - add identity loss
-
-### Import and export
-- images with arbitrary height width and color channels (input/target)
-- add mask for unlabeled regions (by restricting losses to labeled regions)
-- add more preprocessing options for augmentation
-- move lab_colorization(split input image into brightness and color)
-
-### Testing
-- test transfer learning from Pix2Pix2 to CycleGAN
-- fully test CPU mode and multi-GPU mode
-- add different generators 
-
-### Other
-- resize-convolution on top of deconvolution for better upsampling ([Odena et al., 2016](http://distill.pub/2016/deconv-checkerboard/))
-- add dropout layers to faststyle net
 
 ## Done
 - test CycleGAN with u-net generator and log loss and compare with pix2pix: [OK](docs/run_1.md) 
@@ -110,6 +96,9 @@ Minor issues
 - refactor summary and export of images to work for all models: Pix2Pix, CycleGAN, Pix2Pix2
 - two batches delivering unpaired images for CycleGAN
 - import of images from different subdirectories
+- different (classic) loss function
+- implementations for u-net as well as res-net, highway-net, dense-net (with endcoders/decoders as in faststyle res-net)
+- tested transfer of generators from paired to unpaired
 
 ## Acknowledgement
 
