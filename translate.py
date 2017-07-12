@@ -21,6 +21,7 @@ parser.add_argument("--image_height", type=int, help="image height")
 parser.add_argument("--image_width", type=int, help="image width")
 parser.add_argument("--model", required=True, choices=["pix2pix", "pix2pix2", "CycleGAN"])
 parser.add_argument("--generator", default="unet", choices=["unet", "resnet", "highwaynet", "densenet"])
+parser.add_argument("--u_depth", type=int, default=8, help="depth of u net (maximum 8)")
 parser.add_argument("--n_res_blocks", type=int, default= 9, help="number of residual blocks in res net")
 parser.add_argument("--n_highway_units", type=int, default=9, help="number of highway units in highway net")
 parser.add_argument("--n_dense_blocks", type=int, default=5, help="number of dense blocks in dense net")
@@ -315,11 +316,10 @@ def load_images(input_dir, input_name=''):
 
 def create_u_net(generator_inputs, generator_outputs_channels):
 
-    max_depth = 8
     ngf = a.ngf * np.array([1, 2, 4, 8, 8, 8, 8, 8])
 
     def encoder_decoder(input, depth):
-        if depth>max_depth:
+        if depth > a.u_depth:
             return input
 
         with tf.variable_scope("encoder_%d" % depth):
