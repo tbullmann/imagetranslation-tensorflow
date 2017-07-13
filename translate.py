@@ -86,6 +86,30 @@ if a.ngf == 0:
 if a.discriminator == "":
     a.discriminator = "unpaired" if a.model == "CycleGAN" else "paired"
 
+if a.mode == "test":
+    if a.checkpoint is None:
+        raise Exception("checkpoint required for test mode")
+
+    # # load some options from the checkpoint
+    # options = {"which_direction", "ngf", "ndf", "lab_colorization"}
+
+    # load options from the checkpoint, except for
+    excepted_options = {"mode", "input_dir", "input_dir_B", "image_height", "image_width",
+                        "batch_size", "output_dir", "output_filetype", "seed", "checkpoint"}
+
+    with open(os.path.join(a.checkpoint, "options.json")) as f:
+        for key, val in json.loads(f.read()).items():
+            # if key in options:
+            if not key in excepted_options:
+                print("loaded", key, "=", val)
+                setattr(a, key, val)
+
+# TODO Load arguments from JSON file
+# with open(os.path.join(a.output_dir, "options.json"), "r") as ff:
+#     b = (json.loads(ff.read()))   # wrap in SimpleNamespace
+#     for k, v in b.items():
+#         print(k, "=", v)
+
 Examples = collections.namedtuple("Examples", "input_paths, target_paths, inputs, targets, steps_per_epoch")
 Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, discrim_grads_and_vars, gen_loss_GAN, gen_loss_classic, gen_grads_and_vars, train")
 Pix2Pix2Model = collections.namedtuple("Pix2Pix2Model", "predict_real_X, predict_fake_X, predict_real_Y, predict_fake_Y, discrim_X_loss, discrim_Y_loss, discrim_X_grads_and_vars, discrim_Y_grads_and_vars, gen_G_loss_GAN, gen_F_loss_GAN, gen_G_loss_classic, gen_F_loss_classic, gen_G_grads_and_vars, gen_F_grads_and_vars, outputs, reverse_outputs, train")
@@ -979,35 +1003,11 @@ def main():
     if not os.path.exists(a.output_dir):
         os.makedirs(a.output_dir)
 
-    if a.mode == "test":
-        if a.checkpoint is None:
-            raise Exception("checkpoint required for test mode")
-
-        # # load some options from the checkpoint
-        # options = {"which_direction", "ngf", "ndf", "lab_colorization"}
-
-        # load options from the checkpoint, except for
-        excepted_options = {"mode", "input_dir", "input_dir_B", "image_height", "image_width",
-                            "batch_size", "output_dir", "output_filetype", "seed", "checkpoint"}
-
-        with open(os.path.join(a.checkpoint, "options.json")) as f:
-            for key, val in json.loads(f.read()).items():
-                # if key in options:
-                if not key in excepted_options:
-                    print("loaded", key, "=", val)
-                    setattr(a, key, val)
-
     for k, v in a._get_kwargs():
         print(k, "=", v)
 
     with open(os.path.join(a.output_dir, "options.json"), "w") as f:
         f.write(json.dumps(vars(a), sort_keys=True, indent=4))
-
-    # TODO Load arguments from JSON file
-    # with open(os.path.join(a.output_dir, "options.json"), "r") as ff:
-    #     b = (json.loads(ff.read()))   # wrap in SimpleNamespace
-    #     for k, v in b.items():
-    #         print(k, "=", v)
 
     examples = load_examples()
 
