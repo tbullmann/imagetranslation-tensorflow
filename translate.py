@@ -15,10 +15,18 @@ import time
 
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--mode", required=True, choices=["train", "test", "export"])
 parser.add_argument("--input_dir", help="path to folder containing images")
 parser.add_argument("--input_dir_B", help="path to folder containing images")
 parser.add_argument("--image_height", type=int, help="image height")
 parser.add_argument("--image_width", type=int, help="image width")
+parser.add_argument("--batch_size", type=int, default=1, help="number of images in batch")
+parser.add_argument("--output_dir", required=True, help="where to put output files")
+parser.add_argument("--output_filetype", default="png", choices=["png", "jpeg"])
+parser.add_argument("--seed", type=int)
+parser.add_argument("--checkpoint", default=None,
+                    help="directory with checkpoint to resume training from or use for testing")
+
 parser.add_argument("--model", required=True, choices=["pix2pix", "pix2pix2", "CycleGAN"])
 parser.add_argument("--generator", default="unet", choices=["unet", "resnet", "highwaynet", "densenet"])
 parser.add_argument("--u_depth", type=int, default=8, help="depth of u net (maximum 8)")
@@ -28,10 +36,6 @@ parser.add_argument("--n_dense_blocks", type=int, default=5, help="number of den
 parser.add_argument("--n_dense_layers", type=int, default=5, help="number of dense connected layers in each block of the dense net")
 parser.add_argument("--discriminator", default="", help="(CycleGAN only) discriminator on target vs output or paired with input", choices=["paired", "unpaired", ""])
 
-parser.add_argument("--mode", required=True, choices=["train", "test", "export"])
-parser.add_argument("--output_dir", required=True, help="where to put output files")
-parser.add_argument("--seed", type=int)
-parser.add_argument("--checkpoint", default=None, help="directory with checkpoint to resume training from or use for testing")
 parser.add_argument("--restore", default="all", choices=["all", "both", "generators"])
 parser.add_argument("--untouch", default="nothing", choices=["nothing", "core"], help="excluded from training")
 parser.add_argument("--loss", default="log", choices=["log", "square"])
@@ -48,7 +52,6 @@ parser.add_argument("--trace_freq", type=int, default=0, help="trace execution e
 parser.add_argument("--display_freq", type=int, default=0, help="write current training images every display_freq steps")
 parser.add_argument("--save_freq", type=int, default=5000, help="save model every save_freq steps, 0 to disable")
 
-parser.add_argument("--batch_size", type=int, default=1, help="number of images in batch")
 parser.add_argument("--which_direction", type=str, default="AtoB", choices=["AtoB", "BtoA"])
 parser.add_argument("--ngf", type=int, default=0, help="number of generator filters in first conv layer (default 64 for unet, 32 else)")
 parser.add_argument("--ndf", type=int, default=64, help="number of discriminator filters in first conv layer")
@@ -68,7 +71,6 @@ parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of a
 parser.add_argument("--classic_weight", type=float, default=100.0, help="weight on L1 term for generator gradient")
 parser.add_argument("--gan_weight", type=float, default=1.0, help="weight on GAN term for generator gradient")
 
-parser.add_argument("--output_filetype", default="png", choices=["png", "jpeg"])
 
 a = parser.parse_args()
 
@@ -981,11 +983,17 @@ def main():
         if a.checkpoint is None:
             raise Exception("checkpoint required for test mode")
 
-        # load some options from the checkpoint
-        options = {"which_direction", "ngf", "ndf", "lab_colorization"}
+        # # load some options from the checkpoint
+        # options = {"which_direction", "ngf", "ndf", "lab_colorization"}
+
+        # load options from the checkpoint, except for
+        excepted_options = {"mode", "input_dir", "input_dir_B", "image_height", "image_width",
+                            "batch_size", "output_dir", "output_filetype", "seed", "checkpoint"}
+
         with open(os.path.join(a.checkpoint, "options.json")) as f:
             for key, val in json.loads(f.read()).items():
-                if key in options:
+                # if key in options:
+                if not key in excepted_options:
                     print("loaded", key, "=", val)
                     setattr(a, key, val)
 
