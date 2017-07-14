@@ -40,9 +40,8 @@ parser.add_argument("--restore", default="all", choices=["all", "both", "generat
 parser.add_argument("--untouch", default="nothing", choices=["nothing", "core"], help="excluded from training")
 parser.add_argument("--loss", default="log", choices=["log", "square"])
 parser.add_argument("--gen_loss", default="fake", choices=["fake", "negative", "contra"])
-parser.add_argument("--X_type", default="image",  choices=["image", "label"])
-parser.add_argument("--Y_type", default="image",  choices=["image", "label"])
-parser.add_argument("--label_loss", default="mse", choices=["softmax", "naive", "crossentropy", "sqr0", "sqr1", "dice", "mse"])
+parser.add_argument("--X_loss", default="hinge", choices=["hinge", "square", "softmax", "approx", "dice", "logistic"])
+parser.add_argument("--Y_loss", default="hinge", choices=["hinge", "square", "softmax", "approx", "dice", "logistic"])
 
 parser.add_argument("--max_steps", type=int, help="number of training steps (0 to disable)")
 parser.add_argument("--max_epochs", type=int, help="number of training epochs")
@@ -602,43 +601,19 @@ def cross_entropy(targets, outputs):
 
 
 def approx_cross_entropy(targets, outputs):
-
     def approx_log(x):
         # log(x) = (x-1)^1/1 - (x-1)^2/2 + O(x^3)
         return (x - 1.) - tf.square(x - 1.) / 2.
-
     return -tf.reduce_mean(targets * approx_log(outputs) + (1. - targets) * approx_log(1. - outputs))
 
 
 def dice_coe(output, target, epsilon=1e-10):
     """
+    Differentiable Soerensen-Dice coefficient for comparing the similarity of two distributions, usually be used
+    for binary image segmentation i.e. labels are binary. The coefficient = [0, 1], 1 if totally match.
     From http://tensorlayer.readthedocs.io/en/latest/_modules/tensorlayer/cost.html
-
-    Soerensen-Dice coefficient for comparing the similarity of two distributions,
-    usually be used for binary image segmentation i.e. labels are binary.
-    The coefficient = [0, 1], 1 if totally match.
-
-    Parameters
-    -----------
-    output : tensor
-        A distribution with shape: [batch_size, ....], (any dimensions).
-    target : tensor
-        A distribution with shape: [batch_size, ....], (any dimensions).
-    epsilon : float
-        An optional name to attach to this layer.
-
-    Examples
-    ---------
-    >>> outputs = tl.act.pixel_wise_softmax(network.outputs)
-    >>> dice_loss = 1 - tl.cost.dice_coe(outputs, y_, epsilon=1e-5)
-
-    References
-    -----------
-    - https://en.wikipedia.org/wiki/Soerensen-Dice_coefficient
+    See https://en.wikipedia.org/wiki/Soerensen-Dice_coefficient
     """
-    # inse = tf.reduce_sum( tf.mul(output, target) )
-    # l = tf.reduce_sum( tf.mul(output, output) )
-    # r = tf.reduce_sum( tf.mul(target, target) )
     inse = tf.reduce_sum( output * target )
     l = tf.reduce_sum( output * output )
     r = tf.reduce_sum( target * target )
@@ -649,53 +624,57 @@ def dice_coe(output, target, epsilon=1e-10):
         return tf.clip_by_value(dice, 0, 1.0-epsilon)
 
 
-def classic_loss(outputs, targets, target_type):
+def classic_loss(outputs, targets, target_loss):
 
-    if target_type == "image":  # Absolute value loss / L1 loss
+    if target_loss == "hinge":
+        # Absolute value loss / L1 loss
         gen_loss_classic = tf.reduce_mean(tf.abs(targets - outputs))
 
-    elif target_type == "label":
+    elif target_loss == "square":
+        # Mean squared error, L2^2 loss
+        gen_loss_classic = tf.reduce_mean(tf.square(targets - outputs))
 
-        if a.label_loss == "softmax":
-            # Cross entropy loss
-            # # [-1,+1] ==> [0, 1] for labels
-            # Softmax cross entropy if one-hot-labels
-            gen_loss_classic = tf.reduce_mean(tf.losses.softmax_cross_entropy(targets/2+0.5, outputs/2+0.5))
+    elif target_loss == "softmax":
+        # Softmax cross entropy loss for one-hot-labels
+        # Note: Conversion needed: [-1,+1] ==> [0, 1]
+        gen_loss_classic = tf.reduce_mean(tf.losses.softmax_cross_entropy(targets/2+0.5, outputs/2+0.5))
 
-        elif a.label_loss == "naive":
-            # # Without softmax for multi-class, multi-label prediction
-            gen_loss_classic = cross_entropy(targets/2.+0.5, outputs/2.+0.5)
+    elif target_loss == "approx":
+        # Cross entropy for multi-class multi-label
+        # Using an approximation of cross entropy to avoid numerical instability
+        # Note: Conversion needed: [-1,+1] ==> [0, 1]
+        gen_loss_classic = approx_cross_entropy(targets / 2. + 0.5, outputs / 2. + 0.5)
 
-        elif a.label_loss == "crossentropy":
-            # # Approx cross entropy
-            gen_loss_classic = approx_cross_entropy(targets / 2. + 0.5, outputs / 2. + 0.5)
+    elif target_loss == "dice":
+        # # Dice coefficient
+        gen_loss_classic = 1. - dice_coe(outputs, targets)
 
-        elif a.label_loss == "sqr0":
-            # # Square loss for numerical stability ----> Implemented without rescaling: THIS WORKS But why?
-            gen_loss_classic = tf.reduce_mean(targets * tf.square(outputs - 1.) + (1. - targets) * tf.square(outputs))
+    elif target_loss == "logistic":
+        # # [-1,+1] ==> [0, 1] for labels
+        gen_loss_classic = tf.losses.log_loss(targets / 2. + 0.5, outputs / 2. + 0.5)
 
-        elif a.label_loss == "sqr1":
-            # # Square loss for numerical stability +1/+1 --> 0, +1/-1 --> 8, -1/+1 --> 0, -1/-1 --> 8 TODO: Testing this
-            gen_loss_classic = tf.reduce_mean((1. + targets) * tf.square(1. - outputs) + (1. - targets) * tf.square(outputs + 1.))
+    # experimental implementations:
 
-        elif a.label_loss == "dice":
-            # # Dice coefficient
-             gen_loss_classic = 1. - dice_coe(outputs, targets)
+    elif target_loss == "naive":
+        # # Without softmax for multi-class, multi-label prediction, unstable!
+        gen_loss_classic = cross_entropy(targets/2.+0.5, outputs/2.+0.5)
 
-        elif a.label_loss == "mse":
-            # Mean squared error, L2^2 loss
-            gen_loss_classic = tf.reduce_mean(tf.square(targets - outputs))
+    elif target_loss == "sqr0":
+        # # Square loss for numerical stability ----> Implemented without rescaling: THIS WORKS But why?
+        gen_loss_classic = tf.reduce_mean(targets * tf.square(outputs - 1.) + (1. - targets) * tf.square(outputs))
 
-        else:
-            raise ValueError("Unknown label loss type", a.label_loss)
+    elif target_loss == "sqr1":
+        # # Square loss for numerical stability +1/+1 --> 0, +1/-1 --> 8, -1/+1 --> 0, -1/-1 --> 8 TODO: Testing this
+        gen_loss_classic = tf.reduce_mean((1. + targets) * tf.square(1. - outputs) + (1. - targets) * tf.square(outputs + 1.))
 
     else:
-        raise ValueError("Unknown target type", target_type)
+        raise ValueError("Unknown classic loss: ", target_loss)
+
     return gen_loss_classic
 
 
 def create_pix2pix_model(inputs, targets,
-                         generator_name="generator", discriminator_name="discriminator", target_type=a.Y_type):
+                         generator_name="generator", discriminator_name="discriminator", target_classic_loss=a.Y_loss):
     with tf.variable_scope(generator_name):
         out_channels = int(targets.get_shape()[-1])
         outputs = create_generator(inputs, out_channels)
@@ -717,7 +696,7 @@ def create_pix2pix_model(inputs, targets,
 
     with tf.name_scope("loss_"+generator_name):
         gen_loss_GAN = GAN_loss (discrim_loss, predict_fake, predict_real)
-        gen_loss_classic = classic_loss(outputs, targets, target_type)
+        gen_loss_classic = classic_loss(outputs, targets, target_classic_loss)
         gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_classic * a.classic_weight
 
     with tf.name_scope("train_"+discriminator_name):
@@ -762,9 +741,9 @@ def create_pix2pix_model(inputs, targets,
 
 def create_pix2pix2_model(X, Y):
     forward_model = create_pix2pix_model(X, Y,
-                                         generator_name="G", discriminator_name="D_Y", target_type=a.Y_type)
+                                         generator_name="G", discriminator_name="D_Y", target_classic_loss=a.Y_loss)
     reverse_model = create_pix2pix_model(Y, X,
-                                         generator_name="F", discriminator_name="D_X", target_type=a.X_type)
+                                         generator_name="F", discriminator_name="D_X", target_classic_loss=a.X_loss)
     return Pix2Pix2Model(
         predict_real_X=reverse_model.predict_real,
         predict_fake_X=reverse_model.predict_fake,
@@ -840,8 +819,8 @@ def create_CycleGAN_model(X, Y):
 
     # define cycle_consistency loss, one for foward one for backward
     with tf.name_scope("loss_cycle_consistency"):
-        forward_loss_classic = classic_loss(fake_X_from_fake_Y, X, a.X_type)
-        backward_loss_classic = classic_loss(fake_Y_from_fake_X, Y, a.Y_type)
+        forward_loss_classic = classic_loss(fake_X_from_fake_Y, X, a.X_loss)
+        backward_loss_classic = classic_loss(fake_Y_from_fake_X, Y, a.Y_loss)
         cycle_consistency_loss_classic = forward_loss_classic + backward_loss_classic
 
     # define loss for G and F
