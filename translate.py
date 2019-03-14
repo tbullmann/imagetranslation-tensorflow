@@ -60,10 +60,10 @@ parser.add_argument("--no_fliplr", dest="fliplr", action="store_false", help="do
 parser.set_defaults(fliplr=True)
 parser.add_argument("--flipud", dest="flipud", action="store_true", help="flip images vertically")
 parser.add_argument("--no_flipud", dest="flipud", action="store_false", help="don't flip images vertically")
-parser.set_defaults(flipud=False)
+parser.set_defaults(flipud=True)
 parser.add_argument("--transpose", dest="transpose", action="store_true", help="transpose images")
 parser.add_argument("--no_transpose", dest="transpose", action="store_false", help="don't transpose images")
-parser.set_defaults(transpose=False)
+parser.set_defaults(transpose=True)
 
 parser.add_argument("--lr", type=float, default=0.0002, help="initial learning rate for adam")
 parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of adam")
@@ -1001,28 +1001,28 @@ def main():
     # encoding images for saving
     with tf.name_scope("encode_images"):
         display_fetches = {}
-        for name, value in examples._asdict().iteritems():
+        for name, value in examples._asdict().items():
             if "path" in name:
                 display_fetches[name] = value
             elif tf.is_numeric_tensor(value):
                 display_fetches[name] = tf.map_fn(tf.image.encode_png, deprocess(value), dtype=tf.string, name=name+"_pngs")
-        for name, value in model._asdict().iteritems():
+        for name, value in model._asdict().items():
             if tf.is_numeric_tensor(value) and "predict_" not in name:
                 display_fetches[name] = tf.map_fn(tf.image.encode_png, deprocess(value), dtype=tf.string, name=name+"_pngs")
 
     # progress report for all losses
     with tf.name_scope("progress_summary"):
         progress_fetches = {}
-        for name, value in model._asdict().iteritems():
+        for name, value in model._asdict().items():
             if not tf.is_numeric_tensor(value) and "grads_and_vars" not in name and not name == "train":
                 progress_fetches[name] = value
 
     # summaries for model: images, scalars, histograms
-    for name, value in examples._asdict().iteritems():
+    for name, value in examples._asdict().items():
         if tf.is_numeric_tensor(value):
             with tf.name_scope(name + "_summary"):
                 tf.summary.image(name, deprocess(value))
-    for name, value in model._asdict().iteritems():
+    for name, value in model._asdict().items():
         if tf.is_numeric_tensor(value):
             with tf.name_scope(name + "_summary"):
                 if "predict_" in name:    # discriminators produce values in [0, 1]
@@ -1136,7 +1136,7 @@ def main():
                     rate = (step + 1) * a.batch_size / (time.time() - start)
                     remaining = (max_steps - step) * a.batch_size / rate
                     print("progress  epoch %d  step %d  image/sec %0.1f  remaining %dm" % (train_epoch, train_step, rate, remaining / 60))
-                    for name, value in results["progress"].iteritems():
+                    for name, value in results["progress"].items():
                         print (name, value)
 
                 if should(a.save_freq):
